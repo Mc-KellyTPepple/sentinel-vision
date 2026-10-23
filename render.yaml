@@ -1,0 +1,36 @@
+# Render Blueprint for the Sentinel Vision API (the Next.js frontend is deployed on Vercel).
+services:
+  - type: web
+    name: sentinel-vision-api
+    runtime: docker
+    rootDir: services/api
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MODEL_NAME
+        value: yolo11n.pt
+      # Conservative limits for the free instance (shared, throttled CPU). Raise gradually.
+      - key: MAX_UPLOAD_MB
+        value: "20"
+      - key: MAX_VIDEO_SECONDS
+        value: "15"
+      - key: FRAME_STRIDE
+        value: "3"
+      - key: MAX_ANALYSIS_FRAMES
+        value: "100"
+      - key: CONFIDENCE_THRESHOLD
+        value: "0.35"
+      - key: IOU_THRESHOLD
+        value: "0.45"
+      - key: INFERENCE_IMAGE_SIZE
+        value: "416"
+      - key: ALLOWED_ORIGINS           # your Vercel URL(s), comma-separated, no trailing slash
+        sync: false
+      - key: ALLOWED_ORIGIN_REGEX      # optional: Vercel preview URLs
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
