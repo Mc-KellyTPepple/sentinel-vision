@@ -6,14 +6,17 @@ YOLO11 + ByteTrack, and turn sustained detections into reviewable incidents with
 **Stack:** Next.js 14 · TypeScript · Supabase (Auth, Postgres, Row Level Security) · FastAPI · Ultralytics YOLO11n · OpenCV
 
 ## Features
-- **Uploaded-video analysis:** sampled-frame detection with persistent track IDs, per-class confidence and
-  frame-coverage diagnostics, annotated preview, and a detection timeline.
-- **Live webcam tracking:** the browser sends sequential JPEG frames (one in flight at a time) and gets back
-  annotated frames, track labels and a live event feed. Connection errors back off and recover automatically.
+- **Live operations:** webcam frames are tracked on the API (YOLO11 + ByteTrack) and drawn with motion trails. You can
+  **draw zones and counting lines directly on the video**, count objects inside each zone and crossings in each
+  direction, watch a live **occupancy heatmap**, and set **alert rules** (crowding, loitering, line crossing) that raise
+  alerts in the event feed, with an optional sound.
+- **Analysis studio:** upload a short clip and get a report plus a **heatmap**, **trajectory map**, a scrubbable
+  **replay** built from the saved detections, and **per-zone statistics** (objects entered, peak occupancy, dwell time,
+  line crossings, event timeline). The same zones and lines apply to every analysis.
+- **Overview:** KPI cards, detections per analysis, incident status, platform status and recent activity.
 - **Incident workflow:** a class present in at least half of the analysed frames opens a "sustained detection"
-  incident (duplicates suppressed for 24 h); incidents can be acknowledged or resolved.
-- **Audit history:** every status change is recorded by a database trigger in an append-only table that
-  clients can read but not write.
+  incident (duplicates suppressed for 24 h); incidents can be acknowledged or resolved, with an append-only audit history
+  written by a database trigger.
 - **Security model:** the API verifies every request's Supabase token server-side; all tables use RLS so users
   only see their own jobs, detections and incidents.
 
@@ -29,11 +32,30 @@ Vercel hosts only the frontend. The detector needs a long-running Python process
 fit Vercel's serverless functions, so the API runs separately (Render free tier, or any container host).
 
 ## Repository layout
-    apps/web/            Next.js frontend
-    services/api/        FastAPI service (inference, auth verification) + tests
-    supabase/migrations/ SQL migrations 001-007 (apply in order)
-    docs/                Deployment guide, portfolio snippet, historical patch notes
-    render.yaml          Render blueprint for the API
+```
+sentinel-vision/
+├── README.md                  this file
+├── render.yaml                Render blueprint for the API
+├── .gitignore
+├── apps/
+│   └── web/                   Next.js frontend (deployed on Vercel)
+│       ├── app/               page, layout and global styles
+│       ├── components/        overview, live stage, zones and rules, analysis views, charts
+│       ├── lib/               analytics engine (zones, lines, rules, heatmaps) and React hook
+│       └── tests/             analytics engine tests
+├── services/
+│   └── api/                   FastAPI inference service (deployed on Render with Docker)
+│       ├── app/               API, detector, schemas
+│       ├── tests/
+│       ├── Dockerfile
+│       └── yolo11n.pt         detector weights
+├── supabase/
+│   └── migrations/            SQL migrations 001-007, applied in order
+└── docs/
+    ├── DEPLOYMENT.md          step-by-step deployment guide
+    ├── PORTFOLIO_SNIPPET.md   text for a portfolio entry
+    └── patch-notes/           history of earlier feature notes
+```
 
 ## Run locally (Windows, Anaconda)
 ```
@@ -92,5 +114,13 @@ one is running gets `429`; live frames wait briefly and then get `503`.
   and slow analysis. See `docs/DEPLOYMENT.md` for tuning and alternatives.
 
 ## Tests
-`services/api`: `pytest -q` (health, auth, upload validation, busy lock, live-frame guards, CORS).
-`apps/web`: `npx tsc --noEmit` and `npm run lint`.
+- `services/api`: `pytest -q` (health, auth, upload validation, busy lock, live-frame guards, CORS).
+- `apps/web`: `npm test` runs the analytics engine tests (geometry, zones, dwell time, line crossings, rules, heatmaps) in
+  Node 22+; `npx tsc --noEmit` and `npm run lint` check types and style.
+
+## How zones and counting work
+Zones and lines are stored as fractions of the frame, so one setup works at any resolution. An object counts as inside a
+zone when the bottom-centre of its box (where it touches the ground) is inside the polygon. Crossings are detected from the
+movement of that point between frames, so they need a tracked object (a track ID). Dwell time counts only the time an
+object was actually seen inside. The video size comes from the API for new analyses; older saved analyses fall back to an
+estimate from the detections. Setup is kept in this browser (localStorage), not in the database.

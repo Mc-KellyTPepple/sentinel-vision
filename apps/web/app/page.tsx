@@ -3,6 +3,16 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
+import AnalysisVisuals from "../components/AnalysisVisuals";
+import CommandCenter from "../components/CommandCenter";
+import OverlayStage from "../components/OverlayStage";
+import SetupPanel from "../components/SetupPanel";
+import { Icon } from "../components/ui";
+import { useVideoAnalytics } from "../lib/useVideoAnalytics";
+
+const MAX_UPLOAD_MB = process.env.NEXT_PUBLIC_MAX_UPLOAD_MB || "20";
+const MAX_VIDEO_SECONDS = process.env.NEXT_PUBLIC_MAX_VIDEO_SECONDS || "15";
+type Tab = "overview" | "analyze" | "live" | "incidents";
 
 type Detection = { frame:number; timestamp_seconds:number; class_id:number; label:string; confidence:number; x1:number; y1:number; x2:number; y2:number; track_id:number|null };
 type Incident = { id:string; title:string; description:string|null; severity:"low"|"medium"|"high"|"critical"; status:"open"|"acknowledged"|"resolved"; event_type:string; occurred_at:string; job_id:string };
@@ -12,6 +22,7 @@ type Analysis = {
   filename:string; duration_seconds:number; frames_processed:number; processing_seconds:number|null;
   average_inference_fps:number|null; detections_count:number; class_counts:Record<string,number>;
   detections:Detection[]; preview_image:string|null; note:string;
+  frame_width?:number|null; frame_height?:number|null;
 };
 const API = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 type LiveDetection = { track_id:number|null; label:string; confidence:number; x1:number; y1:number; x2:number; y2:number };
@@ -20,11 +31,22 @@ type LiveEvent = { id:string; time:string; message:string; kind:"track"|"warning
 
 export default function Home() {
   const [file,setFile] = useState<File|null>(null);
+  const [tab,setTab] = useState<Tab>("overview");
+  const va = useVideoAnalytics();
+  const ingest = va.ingest;
+  const resetAnalyticsSession = va.resetSession;
+  const setVaMode = va.setMode;
+  const [showTrails,setShowTrails] = useState(true);
+  const [showHeat,setShowHeat] = useState(false);
+  const [showZones,setShowZones] = useState(true);
+  const [apiLatency,setApiLatency] = useState<number|null>(null);
+  const apiFailsRef = useRef(0);
+  useEffect(()=>{ setVaMode("view"); },[tab,setVaMode]);
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState("");
   const [saveNotice,setSaveNotice] = useState("");
   const [result,setResult] = useState<Analysis|null>(null);
-  const [apiStatus,setApiStatus] = useState<"checking"|"online"|"offline">("checking");
+  const [apiStatus,setApiStatus] = useState<"checking"|"waking"|"online"|"offline">("checking");
   const [apiCheckedAt,setApiCheckedAt] = useState("");
   const [session,setSession] = useState<Session|null>(null);
   const [authReady,setAuthReady] = useState(false);
@@ -78,7 +100,7 @@ export default function Home() {
       if (liveVideoRef.current) { liveVideoRef.current.srcObject = stream; await liveVideoRef.current.play(); }
       liveSessionIdRef.current = (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       liveSeenTrackIdsRef.current = new Set(); liveConsecutiveErrorsRef.current = 0; liveHadErrorRef.current = false;
-      setLiveFrame(""); setLiveDetections([]); setLiveFrames(0); setLiveFps(0); setLiveTrackCounts({}); setLiveLastFrameAt(""); setLiveEvents([{id:`start-${Date.now()}`,time:new Date().toLocaleTimeString(),message:"Live camera session started.",kind:"system" as const}]); setLiveProcessedMs(0); setLiveRunning(true);
+      resetAnalyticsSession(); setLiveFrame(""); setLiveDetections([]); setLiveFrames(0); setLiveFps(0); setLiveTrackCounts({}); setLiveLastFrameAt(""); setLiveEvents([{id:`start-${Date.now()}`,time:new Date().toLocaleTimeString(),message:"Live camera session started.",kind:"system" as const}]); setLiveProcessedMs(0); setLiveRunning(true);
     } catch(err) { setLiveError(err instanceof Error ? err.message : "Could not start the camera."); liveStreamRef.current?.getTracks().forEach(track=>track.stop()); liveStreamRef.current=null; }
     finally { setLiveStarting(false); }
   }
@@ -108,7 +130,7 @@ export default function Home() {
         if (!response.ok) { const payload=await response.json().catch(()=>({})); throw new Error(payload.detail || `Live inference failed (${response.status}).`); }
         const data:LiveResponse = await response.json();
         if (cancelled) return;
-        setLiveFrame(data.annotated_image || ""); setLiveDetections(data.detections || []); setLiveFrames(count=>count+1); setLiveProcessedMs(data.processed_ms || 0); setLiveLastFrameAt(new Date().toLocaleTimeString());
+        setLiveFrame(data.annotated_image || ""); ingest({t:Date.now()/1000,width:data.frame_width||640,height:data.frame_height||480,detections:data.detections||[]}); setLiveDetections(data.detections || []); setLiveFrames(count=>count+1); setLiveProcessedMs(data.processed_ms || 0); setLiveLastFrameAt(new Date().toLocaleTimeString());
         const now=performance.now(); setLiveFps(1000/Math.max(1,now-previous)); previous=now;
         liveConsecutiveErrorsRef.current = 0;
         if (liveHadErrorRef.current) { liveHadErrorRef.current=false; setLiveEvents(old=>[{id:`recovered-${Date.now()}`,time:new Date().toLocaleTimeString(),message:"Connection recovered; live inference resumed.",kind:"system" as const},...old].slice(0,20)); }
@@ -123,7 +145,7 @@ export default function Home() {
     };
     void processFrame();
     return ()=>{cancelled=true;if(timeout)clearTimeout(timeout);};
-  },[liveRunning,session?.access_token]);
+  },[liveRunning,session?.access_token,ingest]);
   useEffect(()=>()=>{liveStreamRef.current?.getTracks().forEach(track=>track.stop());},[]);
 
   useEffect(() => {
@@ -169,7 +191,8 @@ export default function Home() {
       });
       const class_counts:Record<string,number> = {};
       for (const d of detections) class_counts[d.label] = (class_counts[d.label] || 0) + 1;
-      setResult({filename:job.original_filename,duration_seconds:Number(job.duration_seconds)||0,frames_processed:job.frames_processed||0,processing_seconds:job.processing_seconds,average_inference_fps:job.average_inference_fps,detections_count:job.detections_count||detections.length,class_counts,detections,preview_image:null,note:`Loaded from your saved Supabase records. ${job.average_inference_fps == null || job.processing_seconds == null ? "Performance metrics were not recorded for this older analysis, so those values are shown as unavailable." : "Saved performance metrics were restored for this analysis."} The original video and annotated preview image are not stored; bounding boxes and detection samples were reconstructed from saved metadata.`});
+      const savedBox = (rows || []).find((r:any) => r.bbox && typeof r.bbox === "object" && Number(r.bbox.frame_width) > 0 && Number(r.bbox.frame_height) > 0)?.bbox;
+      setResult({frame_width:savedBox?Number(savedBox.frame_width):null,frame_height:savedBox?Number(savedBox.frame_height):null,filename:job.original_filename,duration_seconds:Number(job.duration_seconds)||0,frames_processed:job.frames_processed||0,processing_seconds:job.processing_seconds,average_inference_fps:job.average_inference_fps,detections_count:job.detections_count||detections.length,class_counts,detections,preview_image:null,note:`Loaded from your saved Supabase records. ${job.average_inference_fps == null || job.processing_seconds == null ? "Performance metrics were not recorded for this older analysis, so those values are shown as unavailable." : "Saved performance metrics were restored for this analysis."} The original video and annotated preview image are not stored; bounding boxes and detection samples were reconstructed from saved metadata.`});
       setSelectedJobId(job.id);
     } catch(err) { setError(`Could not load this saved analysis: ${err instanceof Error ? err.message : "Unknown database error"}`); }
     finally { setLoadingSavedJob(false); setLoadingSavedJobId(null); }
@@ -253,7 +276,7 @@ export default function Home() {
     const rows = data.detections.map(d => ({
       job_id:job.id, user_id:session.user.id, event_type:d.label, label:d.label,
       confidence:d.confidence, frame_index:d.frame, timestamp_seconds:d.timestamp_seconds,
-      bbox:{x1:d.x1,y1:d.y1,x2:d.x2,y2:d.y2}, track_id:d.track_id
+      bbox:{x1:d.x1,y1:d.y1,x2:d.x2,y2:d.y2,...(data.frame_width&&data.frame_height?{frame_width:data.frame_width,frame_height:data.frame_height}:{})}, track_id:d.track_id
     }));
     for (let i=0; i<rows.length; i+=100) {
       const {error:eventsError} = await supabase.from("detection_events").insert(rows.slice(i,i+100));
@@ -296,10 +319,16 @@ export default function Home() {
 
   async function checkApi() {
     const controller = new AbortController();
-    const timeout = setTimeout(()=>controller.abort(),3500);
-    try { const r = await fetch(`${API}/health`,{cache:"no-store",signal:controller.signal}); setApiStatus(r.ok ? "online" : "offline"); }
-    catch { setApiStatus("offline"); }
-    finally { clearTimeout(timeout); setApiCheckedAt(new Date().toLocaleTimeString()); }
+    const timeout = setTimeout(()=>controller.abort(),6000);
+    const started = performance.now();
+    try {
+      const r = await fetch(`${API}/health`,{cache:"no-store",signal:controller.signal});
+      if (r.ok) { apiFailsRef.current = 0; setApiStatus("online"); setApiLatency(Math.round(performance.now()-started)); }
+      else { setApiStatus("offline"); }
+    } catch {
+      // A sleeping free-tier server answers nothing for up to a minute: call that "waking up", not "offline".
+      apiFailsRef.current += 1; setApiStatus(apiFailsRef.current <= 9 ? "waking" : "offline");
+    } finally { clearTimeout(timeout); setApiCheckedAt(new Date().toLocaleTimeString()); }
   }
   useEffect(()=>{ let active=true; const check=async()=>{ if(!active)return; await checkApi(); }; void check(); const interval=setInterval(()=>{void check();},10000); return ()=>{active=false;clearInterval(interval);}; },[]);
   async function analyze(e:FormEvent<HTMLFormElement>) {
@@ -350,17 +379,20 @@ export default function Home() {
 
   return <main className="shell">
     <header className="topbar">
-      <a className="brand" href="#"><span className="brand-mark" aria-hidden="true">◉</span> <span>Sentinel<span className="muted">Vision</span></span></a>
-      <div className="status"><span className={`dot ${apiStatus}`} /> API {apiStatus}
-        <button className="small-button" onClick={()=>void checkApi()}>Check API</button>{apiCheckedAt&&<small style={{display:"block",fontSize:10,color:"var(--muted, #98a2b3)"}}>Checked {apiCheckedAt}</small>}
+      <a className="brand" href="#"><span className="brand-mark" aria-hidden="true">◉</span><span className="brand-text"><span>Sentinel<span className="muted">Vision</span></span><span className="brand-sub">Real-time AI video intelligence</span></span></a>
+      <div className="topbar-right"><div className="status"><span className={`dot ${apiStatus}`} /> {apiStatus==="waking"?"API waking up…":`API ${apiStatus}`}
+        <button className="small-button" onClick={()=>void checkApi()}>Check API</button>{apiCheckedAt&&<small style={{display:"block",fontSize:10,color:"var(--muted, #98a2b3)"}}>{apiStatus==="online"&&apiLatency!==null?`${apiLatency} ms · `:""}Checked {apiCheckedAt}</small>}
       </div>
+      {session&&<div className="account-chip"><span title={session.user.email||""}>{session.user.email}</span><button className="small-button" onClick={signOut}>Sign out</button></div>}</div>
     </header>
-    <section className="hero">
-      <div className="eyebrow"><span className="pulse" /> VIDEO INTELLIGENCE PLATFORM</div>
+    <div className={authReady && session ? undefined : "landing"}>
+    {!(authReady && session) && <section className="hero">
+      <div className="eyebrow"><span className="pulse" /> REAL-TIME AI VIDEO INTELLIGENCE</div>
       <h1>See the events<br/><span className="gradient">that matter.</span></h1>
-      <p className="hero-copy">Analyze short video clips with computer vision. Inspect detections, measure inference performance, and build toward reliable incident workflows.</p>
-    </section>
-    <section className="auth-panel">
+      <p className="hero-copy">Track objects live through your camera, draw zones and counting lines, get rule-based alerts, and replay what happened, powered by YOLO11 detection and ByteTrack tracking.</p>
+      <div className="landing-features"><span><Icon name="target" size={15}/> Live tracking</span><span><Icon name="polygon" size={15}/> Zones and rules</span><span><Icon name="flame" size={15}/> Heatmaps and replay</span><span><Icon name="shield" size={15}/> Incident audit trail</span></div>
+    </section>}
+    {!(authReady && session) && <section className="auth-panel">
       <div className="auth-heading"><div><span className="step">ACCOUNT</span><h2>{session ? "Your Sentinel Vision account" : "Sign in to access Sentinel Vision"}</h2></div><span className="pill">Supabase Auth</span></div>
       {!supabase && <p className="error">Supabase is not configured. Add your project URL and publishable key to apps/web/.env.local, then restart Next.js.</p>}
       {!authReady && <p className="subcopy">Checking your session…</p>}
@@ -373,46 +405,112 @@ export default function Home() {
       </form>}
       {authMessage && <p className="auth-message">{authMessage}</p>}
       {saveNotice && <p className="save-notice">{saveNotice}</p>}
-      {session && jobs.length > 0 && <div className="saved-jobs"><h3>Recent saved analyses</h3>{jobs.map(job=><div className="saved-job" key={job.id}><span><strong>{job.original_filename}</strong><small>{new Date(job.created_at).toLocaleString()}</small></span><span>{job.detections_count} detections · {job.status}</span><button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id ? "Loading…" : selectedJobId===job.id ? "Viewing" : "Open report"}</button></div>)}</div>}
-    </section>
+
+    </section>}
+    </div>
     {authReady && session ? <section className="workspace">
-      <div className="panel" style={{gridColumn:"1 / -1"}}>
-        <div className="panel-heading"><div><span className="step">LIVE</span><h2>Live webcam tracking</h2></div><span className="pill">{liveStarting?"Starting":liveRunning?(liveError?"Reconnecting":"Live") : "Stopped · last results retained"}</span></div>
-        <p className="subcopy">Use your computer webcam to detect objects and estimate track IDs in near real time. Camera frames are sent to your local Sentinel Vision API for inference; they are not saved as an analysis or uploaded to Supabase.</p>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,320px),1fr))",gap:16,alignItems:"start"}}>
-          <div style={{position:"relative",minHeight:210,background:"#080d16",borderRadius:14,overflow:"hidden",display:"grid",placeItems:"center",border:"1px solid var(--border, #293244)"}}>
-            <video ref={liveVideoRef} muted playsInline autoPlay style={{width:"100%",maxHeight:420,objectFit:"contain",display:liveRunning?"block":"none"}} />
-            {!liveRunning && <div style={{padding:28,textAlign:"center",color:"var(--muted, #98a2b3)"}}><div style={{fontSize:30,marginBottom:8}}>◉</div><strong>Camera is stopped</strong><p className="subcopy">Start the camera to begin live detection. Previous detections remain available for review.</p></div>}
-            {liveRunning && liveFrame && <img src={liveFrame} alt="Latest live webcam frame annotated with detected objects and track IDs" style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"contain",pointerEvents:"none"}} />}
-          </div>
-          <div>
+      <nav className="tabs" role="tablist" aria-label="Workspaces">
+        <button type="button" role="tab" aria-selected={tab==="overview"} className={`tab${tab==="overview"?" active":""}`} onClick={()=>setTab("overview")}><Icon name="overview" size={16} /> Overview</button>
+        <button type="button" role="tab" aria-selected={tab==="live"} className={`tab${tab==="live"?" active":""}`} onClick={()=>setTab("live")}><Icon name="camera" size={16} /> Live operations{(liveRunning||liveStarting)&&<span className="tab-dot" aria-label="camera running" />}</button>
+        <button type="button" role="tab" aria-selected={tab==="analyze"} className={`tab${tab==="analyze"?" active":""}`} onClick={()=>setTab("analyze")}><Icon name="film" size={16} /> Analysis studio</button>
+        <button type="button" role="tab" aria-selected={tab==="incidents"} className={`tab${tab==="incidents"?" active":""}`} onClick={()=>setTab("incidents")}><Icon name="shield" size={16} /> Incidents<span className="tab-count">{incidents.filter(i=>i.status!=="resolved").length} active</span></button>
+      </nav>
+      <div hidden={tab!=="overview"}>
+        <CommandCenter
+          jobs={jobs}
+          incidents={incidents}
+          apiStatus={apiStatus}
+          apiLatencyMs={apiLatency}
+          live={{running:liveRunning,frames:liveFrames,processedMs:liveProcessedMs,objects:liveDetections.length,tracks:Object.keys(liveTrackCounts).length}}
+          setup={{zones:va.setup.zones.length,lines:va.setup.lines.length,rules:va.setup.rules.length,alerts:va.events.length}}
+          onOpenJob={(job)=>{void loadSavedAnalysis(job);setTab("analyze");}}
+          onGoto={setTab}
+          onStartLive={()=>void startLiveCamera()}
+        />
+      </div>
+      <div className="panel live-panel" hidden={tab!=="live"}>
+        <div className="panel-heading"><div><span className="step">LIVE</span><h2>Live operations</h2></div><span className="pill">{liveStarting?"Starting":liveRunning?(liveError?"Reconnecting":"Live") : "Stopped · last results retained"}</span></div>
+        <p className="subcopy">Track objects through your webcam in near real time. Draw zones and counting lines on the video and add alert rules. Frames are sent to the Sentinel Vision API for inference; they are not saved as an analysis or uploaded to Supabase.</p>
+        <div className="live-layout">
+          <div className="live-main">
             <canvas ref={liveCanvasRef} style={{display:"none"}} />
-            <div className="metrics" style={{gridTemplateColumns:"repeat(2,minmax(0,1fr))"}}><div className="metric"><span>Live status</span><strong>{liveStarting?"Starting":liveRunning?(liveError?"Reconnecting":"Live"):"Stopped"}</strong></div><div className="metric"><span>Last frame received</span><strong style={{fontSize:13}}>{liveLastFrameAt||"—"}</strong></div><div className="metric"><span>Frames analyzed</span><strong>{liveFrames}</strong></div><div className="metric"><span>Inference loop</span><strong>{liveRunning?`${liveFps.toFixed(1)} FPS`:"—"}</strong></div><div className="metric"><span>Objects this frame</span><strong>{liveDetections.length}</strong></div><div className="metric"><span>Tracks observed</span><strong>{Object.keys(liveTrackCounts).length}</strong></div><div className="metric"><span>API processing</span><strong>{liveRunning?`${liveProcessedMs.toFixed(0)} ms`:"—"}</strong></div><div className="metric"><span>Connection</span><strong>{!liveRunning?"Stopped":liveError?"Retrying":"Connected"}</strong></div></div>
-            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:14}}>{!liveRunning?<button type="button" className="primary-button" onClick={()=>void startLiveCamera()} disabled={liveStarting}>{liveStarting?<><span className="spinner"/> Starting camera…</>:"Start live camera"}</button>:<button type="button" className="primary-button" onClick={stopLiveCamera}>Stop camera</button>}{liveRunning&&<button type="button" className="small-button" onClick={()=>{setLiveTrackCounts({});setLiveFrames(0);liveSeenTrackIdsRef.current=new Set();setLiveEvents(old=>[{id:`reset-${Date.now()}`,time:new Date().toLocaleTimeString(),message:"Session counters and new-track alerts reset.",kind:"system" as const},...old].slice(0,20));}}>Reset live stats</button>}</div>
-            {liveError&&<div className="error" style={{marginTop:12}}>{liveError}</div>}{!liveRunning&&(liveDetections.length>0||liveLastFrameAt)&&<p className="subcopy" style={{marginTop:10}}>Showing stale session results from {liveLastFrameAt||"the last camera run"}; these are not current live detections.</p>}{liveRunning&&liveError&&<p className="subcopy" style={{marginTop:10}}>Latest successful frame: {liveLastFrameAt||"none yet"}. Results may be stale until the connection recovers.</p>}
-            <h3 style={{marginTop:18}}>Current detections</h3>
-            {!liveDetections.length?<p className="subcopy">No objects detected in the latest frame, or the camera has not started.</p>:<div className="class-list">{liveDetections.map((d,i)=><div className="class-row" key={`${d.track_id}-${d.label}-${i}`}><span>{d.label}{d.track_id!==null?` · Track #${d.track_id}`:" · untracked"}</span><strong>{(d.confidence*100).toFixed(1)}%</strong></div>)}</div>}
-            <h3 style={{marginTop:18}}>Live event feed</h3>
-            {!liveEvents.length?<p className="subcopy">Camera starts, new tracks, and connection changes will appear here.</p>:<div className="class-list">{liveEvents.slice(0,10).map(event=><div className="class-row" key={event.id}><span><strong>{event.kind==="warning"?"Connection warning":event.kind==="track"?"New track":"Session event"}</strong><small style={{display:"block",color:"var(--muted, #98a2b3)"}}>{event.time} · {event.message}</small></span><span className="pill">{event.kind}</span></div>)}</div>}
-            <h3 style={{marginTop:18}}>Tracks observed this session</h3>
-            {!Object.keys(liveTrackCounts).length?<p className="subcopy">Track summaries appear after objects are detected.</p>:<div className="class-list">{Object.entries(liveTrackCounts).sort((a,b)=>Number(a[0])-Number(b[0])).map(([id,t])=><div className="class-row" key={id}><span><strong>#{id}</strong> · {t.label}<small style={{display:"block",color:"var(--muted, #98a2b3)"}}>{t.count} frame observations · {(t.confidenceTotal/t.count*100).toFixed(1)}% avg. confidence</small></span><span className="pill">{liveRunning&&!liveError?"Seen this session":"Last seen"}</span></div>)}</div>}
+            <OverlayStage
+              live={liveRunning}
+              width={va.frameSize.width}
+              height={va.frameSize.height}
+              zones={va.setup.zones}
+              lines={va.setup.lines}
+              paths={liveRunning?(va.snapshot?.paths??[]):[]}
+              heat={showHeat?va.heat:null}
+              heatOpacity={0.7}
+              zoneCounts={va.snapshot?.zoneCounts}
+              lineCounts={va.snapshot?.lineCounts}
+              showZones={showZones}
+              showTrails={showTrails}
+              mode={va.mode}
+              onZoneDrawn={va.addZone}
+              onLineDrawn={va.addLine}
+              onCancelDraw={()=>va.setMode("view")}
+              ariaLabel="Live camera with zones, counting lines and motion trails"
+            >
+              <video ref={liveVideoRef} className="stage-media" muted playsInline autoPlay style={{display:liveRunning?"block":"none"}} />
+              {liveRunning && liveFrame && <img className="stage-media" src={liveFrame} alt="Latest live webcam frame annotated with detected objects and track IDs" style={{pointerEvents:"none"}} />}
+              {!liveRunning && <div className="stage-empty"><strong>Camera is stopped</strong><span>Start the camera to begin live detection. Zones and lines you draw are remembered.</span></div>}
+              {liveRunning && <span className="live-badge"><i />LIVE</span>}
+            </OverlayStage>
+            <div className="live-toolbar">
+              {!liveRunning
+                ? <button type="button" className="primary-button" style={{width:"auto",margin:0,padding:"10px 18px"}} onClick={()=>void startLiveCamera()} disabled={liveStarting}>{liveStarting?<><span className="spinner"/> Starting camera…</>:<><Icon name="camera" size={16}/> Start live camera</>}</button>
+                : <button type="button" className="primary-button" style={{width:"auto",margin:0,padding:"10px 18px"}} onClick={stopLiveCamera}>Stop camera</button>}
+              <button type="button" className={`small-button${showTrails?" is-on":""}`} onClick={()=>setShowTrails(v=>!v)}><Icon name="route" size={15}/> Trails</button>
+              <button type="button" className={`small-button${showHeat?" is-on":""}`} onClick={()=>setShowHeat(v=>!v)}><Icon name="flame" size={15}/> Heatmap</button>
+              <button type="button" className={`small-button${showZones?" is-on":""}`} onClick={()=>setShowZones(v=>!v)}><Icon name="polygon" size={15}/> Zones</button>
+              {liveRunning&&<button type="button" className="small-button" onClick={()=>{setLiveTrackCounts({});setLiveFrames(0);liveSeenTrackIdsRef.current=new Set();resetAnalyticsSession();setLiveEvents(old=>[{id:`reset-${Date.now()}`,time:new Date().toLocaleTimeString(),message:"Session counters and new-track alerts reset.",kind:"system" as const},...old].slice(0,20));}}>Reset stats</button>}
+            </div>
+            <div className="live-kpis">
+              <div className="metric"><span>Objects now</span><strong>{liveDetections.length}</strong></div>
+              <div className="metric"><span>Tracks observed</span><strong>{Object.keys(liveTrackCounts).length}</strong></div>
+              <div className="metric"><span>API latency</span><strong>{liveRunning?`${liveProcessedMs.toFixed(0)} ms`:"—"}</strong></div>
+              <div className="metric"><span>Frames analyzed</span><strong>{liveFrames}</strong></div>
+            </div>
+            {liveError&&<div className="error">{liveError}</div>}
+            {!liveRunning&&(liveDetections.length>0||liveLastFrameAt)&&<p className="subcopy" style={{margin:0}}>Showing stale session results from {liveLastFrameAt||"the last camera run"}; these are not current live detections.</p>}
+            {liveRunning&&liveError&&<p className="subcopy" style={{margin:0}}>Latest successful frame: {liveLastFrameAt||"none yet"}. Results may be stale until the connection recovers.</p>}
+            <p className="privacy-note" style={{margin:0}}>Tracking IDs are temporary and may change if objects disappear or tracking is restarted. Browser camera permission is required. The hosted demo runs on a small shared CPU, so each frame can take a few seconds. Last frame: {liveLastFrameAt||"—"} · loop {liveRunning?`${liveFps.toFixed(1)} FPS`:"—"} · {!liveRunning?"stopped":liveError?"retrying":"connected"}.</p>
+          </div>
+          <div className="live-side">
+            <div className="card"><SetupPanel va={va} /></div>
+            <details className="fold"><summary>Current detections ({liveDetections.length})</summary><div>
+              {!liveDetections.length?<p className="subcopy" style={{margin:0}}>No objects detected in the latest frame, or the camera has not started.</p>:<div className="class-list">{liveDetections.map((d,i)=><div className="class-row" key={`${d.track_id}-${d.label}-${i}`}><span>{d.label}{d.track_id!==null?` · Track #${d.track_id}`:" · untracked"}</span><strong>{(d.confidence*100).toFixed(1)}%</strong></div>)}</div>}
+            </div></details>
+            <details className="fold"><summary>Session events ({liveEvents.length})</summary><div>
+              {!liveEvents.length?<p className="subcopy" style={{margin:0}}>Camera starts, new tracks, and connection changes will appear here.</p>:<div className="class-list">{liveEvents.slice(0,10).map(event=><div className="class-row" key={event.id}><span><strong>{event.kind==="warning"?"Connection warning":event.kind==="track"?"New track":"Session event"}</strong><small style={{display:"block",color:"var(--muted, #98a2b3)"}}>{event.time} · {event.message}</small></span><span className="pill">{event.kind}</span></div>)}</div>}
+            </div></details>
+            <details className="fold"><summary>Tracks this session ({Object.keys(liveTrackCounts).length})</summary><div>
+              {!Object.keys(liveTrackCounts).length?<p className="subcopy" style={{margin:0}}>Track summaries appear after objects are detected.</p>:<div className="class-list">{Object.entries(liveTrackCounts).sort((a,b)=>Number(a[0])-Number(b[0])).map(([id,t])=><div className="class-row" key={id}><span><strong>#{id}</strong> · {t.label}<small style={{display:"block",color:"var(--muted, #98a2b3)"}}>{t.count} frame observations · {(t.confidenceTotal/t.count*100).toFixed(1)}% avg. confidence</small></span><span className="pill">{liveRunning&&!liveError?"Seen this session":"Last seen"}</span></div>)}</div>}
+            </div></details>
           </div>
         </div>
-        <p className="privacy-note" style={{marginTop:14}}>Tracking IDs are temporary and may change if objects disappear or tracking is restarted. Keep the API running locally. Browser camera permission is required; localhost is treated as a secure context.</p>
       </div>
+      <div className="analyze-grid" hidden={tab!=="analyze"}>
+      <div className="analyze-left">
       <div className="panel">
         <div className="panel-heading"><div><span className="step">01</span><h2>Analyze footage</h2></div><span className="pill">CPU inference</span></div>
-        <p className="subcopy">Upload a short MP4, MOV, AVI, MKV, or WebM clip. Initial limits: 20 MB and 30 seconds.</p>
+        <p className="subcopy">Upload a short MP4, MOV, AVI, MKV, or WebM clip. Limits: {MAX_UPLOAD_MB} MB and {MAX_VIDEO_SECONDS} seconds.</p>
         <form onSubmit={analyze}>
           <label className="dropzone"><span className="upload-icon">↑</span>
             <strong>{file ? file.name : "Choose a video file"}</strong>
             <span>{file ? `${(file.size/1024/1024).toFixed(2)} MB` : "Click to browse · Keep clips short"}</span>
             <input type="file" accept="video/*,.mkv" onChange={e=>{setFile(e.target.files?.[0]||null);setResult(null);setError("");setSaveNotice("");}}/>
           </label>
-          <button className="primary-button" type="submit" disabled={!file||busy}>{busy?<><span className="spinner"/> Analyzing video…</>:"Run AI analysis"} <span>↗</span></button>
+          <button className="primary-button" type="submit" disabled={!file||busy||liveRunning||liveStarting}>{busy?<><span className="spinner"/> Analyzing video…</>:"Run AI analysis"} <span>↗</span></button>
         </form>
+        {(liveRunning||liveStarting)&&<p className="subcopy">Stop the live camera to run an analysis: uploads and live tracking share one detector.</p>}
         {error&&<div className="error">{error}</div>}
         <div className="privacy-note"><span>◈</span> Video clips are processed temporarily. Saved analyses retain metadata and detection coordinates, not the original video file or annotated preview.</div>
+      </div>
+      {saveNotice && <p className="save-notice">{saveNotice}</p>}
+      {jobs.length > 0 && <div className="panel"><div className="saved-jobs"><h3>Recent saved analyses</h3>{jobs.map(job=><div className="saved-job" key={job.id}><span><strong>{job.original_filename}</strong><small>{new Date(job.created_at).toLocaleString()}</small></span><span>{job.detections_count} detections · {job.status}</span><button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id ? "Loading…" : selectedJobId===job.id ? "Viewing" : "Open report"}</button></div>)}</div></div>}
       </div>
       <div className="panel">
         <div className="panel-heading"><div><span className="step">02</span><h2>Analysis report</h2></div><span className="pill">{busy?"Processing":result?(selectedJobId?"Saved report":"Complete"):"Awaiting video"}</span></div>
@@ -428,6 +526,7 @@ export default function Home() {
           </div>
           <div className="result-meta"><span>{result.filename}</span><span>{result.duration_seconds}s video</span></div>
           {result.preview_image&&<div className="preview-block"><h3>Detection preview</h3><p className="subcopy">Bounding boxes and labels from the first analyzed frame.</p><img className="detection-preview" src={result.preview_image} alt="First analyzed video frame with AI detection boxes" /></div>}
+          <AnalysisVisuals detections={result.detections} va={va} frameSize={result.frame_width&&result.frame_height?{width:result.frame_width,height:result.frame_height}:null} />
           <h3>Detected classes</h3>
           {!Object.keys(result.class_counts).length?<p className="subcopy">No objects above the confidence threshold were detected.</p>:
             <div className="class-list">{Object.entries(result.class_counts).sort((a,b)=>b[1]-a[1]).map(([label,count])=><div className="class-row" key={label}><span>{label}</span><strong>{count}</strong></div>)}</div>}
@@ -471,12 +570,13 @@ export default function Home() {
           <p className="footnote">{result.note}</p>
         </div>}
       </div>
-      <section className="panel incidents-panel">
+      </div>
+      <section className="panel incidents-panel" hidden={tab!=="incidents"}>
         <div className="panel-heading"><div><span className="step">03</span><h2>Incident management</h2></div><span className="pill">{incidents.filter(i=>i.status!=="resolved").length} active</span></div>
         <p className="subcopy">Incidents are generated when an object class appears in at least 50% of analyzed frames. High severity means at least 80%. These are review cues, not proof of a security event.</p>
         {incidentNotice && <p className="save-notice">{incidentNotice}</p>}
         <div className="incident-filters" style={{display:"flex",gap:8,flexWrap:"wrap",margin:"14px 0"}}>{(["all","open","acknowledged","resolved"] as const).map(status=><button key={status} type="button" className="small-button" aria-pressed={incidentFilter===status} onClick={()=>setIncidentFilter(status)} style={{opacity:incidentFilter===status?1:.65,fontWeight:incidentFilter===status?700:400}}>{status==="all"?`All (${incidents.length})`:`${status[0].toUpperCase()+status.slice(1)} (${incidents.filter(i=>i.status===status).length})`}</button>)}</div>
-        {incidents.length===0 ? <div className="empty-state"><strong>No incidents yet</strong><p>Analyze a clip to create sustained-detection incidents, or check your Supabase incident-write policy.</p></div> : (()=>{const visible=incidents.filter(i=>incidentFilter==="all"||i.status===incidentFilter);const groups=Array.from(visible.reduce((map,i)=>{const key=i.job_id||"unknown";if(!map.has(key))map.set(key,[]);map.get(key)!.push(i);return map;},new Map<string,Incident[]>()));return visible.length===0?<div className="empty-state"><strong>No {incidentFilter} incidents</strong><p>Choose another status filter to see more incidents.</p></div>:<div className="incident-groups">{groups.map(([jobId,items])=>{const job=jobs.find(j=>j.id===jobId);return <div key={jobId} style={{marginBottom:20}}><div className="incident-group-heading" style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap",marginBottom:10}}><div><h3 style={{marginBottom:4}}>{job?.original_filename||"Saved analysis"}</h3><small>{items.length} incident{items.length===1?"":"s"} · {new Date(items[0].occurred_at).toLocaleString()}</small></div>{job&&<button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id?"Loading…":selectedJobId===job.id?"Viewing report":"Open analysis report"}</button>}</div><div className="incident-list">{items.map(incident=><article className="incident-card" key={incident.id}><div className="incident-top"><div><span className={`incident-severity ${incident.severity}`}>{incident.severity}</span><h3>{incident.title}</h3></div><span className={`incident-status ${incident.status}`}>{incident.status}</span></div><p>{incident.description}</p><small>{new Date(incident.occurred_at).toLocaleString()}</small>{incident.status!=="resolved"&&<div className="incident-actions">{incident.status==="open"&&<button className="small-button" onClick={()=>void updateIncident(incident.id,"acknowledged")}>Acknowledge</button>}<button className="small-button" onClick={()=>void updateIncident(incident.id,"resolved")}>Resolve</button></div>}<div style={{marginTop:10}}><button className="small-button" type="button" onClick={()=>void loadIncidentAudit(incident.id)}>{auditLoadingId===incident.id?"Loading history…":auditOpenId===incident.id?"Hide audit history":"View audit history"}</button></div>{auditOpenId===incident.id&&<div style={{marginTop:10,padding:12,border:"1px solid var(--border, #334155)",borderRadius:8}}><strong>Status change history</strong><p className="subcopy" style={{margin:"6px 0",overflowWrap:"anywhere"}}>Incident ID: <code>{incident.id}</code></p>{auditLoadingId===incident.id?<p className="subcopy">Loading history…</p>:auditErrorByIncident[incident.id]?<p role="alert" style={{marginBottom:0}}>{auditErrorByIncident[incident.id]}</p>:(auditByIncident[incident.id]||[]).length===0?<p className="subcopy" style={{marginBottom:0}}>No status changes have been recorded for this incident yet.</p>:<ol style={{paddingLeft:20,marginBottom:0}}>{(auditByIncident[incident.id]||[]).map(entry=><li key={entry.id} style={{marginBottom:8}}><strong>{entry.previous_status} → {entry.new_status}</strong><div className="subcopy">{formatAuditTimestamp(entry.changed_at)} · User {entry.user_id.slice(0,8)}{entry.changed_by&&entry.changed_by!==entry.user_id?` · Actor ${entry.changed_by.slice(0,8)}`:""}</div></li>)}</ol>}</div>}</article>)}</div></div>})}</div>})()}
+        {incidents.length===0 ? <div className="empty-state"><strong>No incidents yet</strong><p>Analyze a clip to create sustained-detection incidents, or check your Supabase incident-write policy.</p></div> : (()=>{const visible=incidents.filter(i=>incidentFilter==="all"||i.status===incidentFilter);const groups=Array.from(visible.reduce((map,i)=>{const key=i.job_id||"unknown";if(!map.has(key))map.set(key,[]);map.get(key)!.push(i);return map;},new Map<string,Incident[]>()));return visible.length===0?<div className="empty-state"><strong>No {incidentFilter} incidents</strong><p>Choose another status filter to see more incidents.</p></div>:<div className="incident-groups">{groups.map(([jobId,items],groupIndex)=>{const job=jobs.find(j=>j.id===jobId);return <details key={jobId} className="incident-group" open={groupIndex===0}><summary className="incident-group-heading"><div><h3 style={{marginBottom:4}}>{job?.original_filename||"Saved analysis"}</h3><small>{items.length} incident{items.length===1?"":"s"} · {items.filter(i=>i.status==="open").length} open · {new Date(items[0].occurred_at).toLocaleString()}</small></div>{job&&<button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id?"Loading…":selectedJobId===job.id?"Viewing report":"Open analysis report"}</button>}</summary><div className="incident-list">{items.map(incident=><article className="incident-card" key={incident.id}><div className="incident-top"><div><span className={`incident-severity ${incident.severity}`}>{incident.severity}</span><h3>{incident.title}</h3></div><span className={`incident-status ${incident.status}`}>{incident.status}</span></div>{incident.description&&<p title={incident.description}>{(()=>{const first=incident.description.split(". ")[0];return first.endsWith(".")?first:first+".";})()}</p>}<small>{new Date(incident.occurred_at).toLocaleString()}</small><div className="incident-actions">{incident.status==="open"&&<button className="small-button" onClick={()=>void updateIncident(incident.id,"acknowledged")}>Acknowledge</button>}{incident.status!=="resolved"&&<button className="small-button" onClick={()=>void updateIncident(incident.id,"resolved")}>Resolve</button>}<button className="small-button" type="button" onClick={()=>void loadIncidentAudit(incident.id)}>{auditLoadingId===incident.id?"Loading history…":auditOpenId===incident.id?"Hide audit history":"View audit history"}</button></div>{auditOpenId===incident.id&&<div style={{marginTop:10,padding:12,border:"1px solid var(--border, #334155)",borderRadius:8}}><strong>Status change history</strong><p className="subcopy" style={{margin:"6px 0",overflowWrap:"anywhere"}}>Incident ID: <code>{incident.id}</code></p>{auditLoadingId===incident.id?<p className="subcopy">Loading history…</p>:auditErrorByIncident[incident.id]?<p role="alert" style={{marginBottom:0}}>{auditErrorByIncident[incident.id]}</p>:(auditByIncident[incident.id]||[]).length===0?<p className="subcopy" style={{marginBottom:0}}>No status changes have been recorded for this incident yet.</p>:<ol style={{paddingLeft:20,marginBottom:0}}>{(auditByIncident[incident.id]||[]).map(entry=><li key={entry.id} style={{marginBottom:8}}><strong>{entry.previous_status} → {entry.new_status}</strong><div className="subcopy">{formatAuditTimestamp(entry.changed_at)} · User {entry.user_id.slice(0,8)}{entry.changed_by&&entry.changed_by!==entry.user_id?` · Actor ${entry.changed_by.slice(0,8)}`:""}</div></li>)}</ol>}</div>}</article>)}</div></details>})}</div>})()}
       </section>
     </section> : <section className="panel access-panel">
       <div className="panel-heading"><div><span className="step">ACCESS</span><h2>{authReady ? "Sign in to access video analysis" : "Checking account access"}</h2></div><span className="pill">Account required</span></div>

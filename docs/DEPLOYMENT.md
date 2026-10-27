@@ -69,6 +69,12 @@ Symptoms: out-of-memory restarts, analysis taking minutes, request timeouts. Opt
    choice for demos like this (check its current limits); Render's paid plans also work. Only `NEXT_PUBLIC_API_BASE_URL` and `ALLOWED_ORIGINS` change.
 3. Export the detector to ONNX and use onnxruntime to cut memory; this requires replacing the Ultralytics tracker usage.
 
+## Performance on the free tier
+`OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1` (set in `render.yaml`) stop PyTorch from oversubscribing the small CPU slice.
+Each live frame still takes a few seconds on a free instance; expect a slideshow rather than video. If a frame takes
+tens of seconds, lower `INFERENCE_IMAGE_SIZE` to 320, or move the API to a host with real CPU cores.
+Uploads and the live camera share one detector, so stop the camera before analysing a clip.
+
 ## Operations notes
 - Free Render services sleep after inactivity. The dashboard polls `/health` every 10 s while a tab is open, which
   keeps the service awake; that uses free instance hours shared across your free services.

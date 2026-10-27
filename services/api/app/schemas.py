@@ -24,6 +24,9 @@ class AnalysisSummary(BaseModel):
     class_counts: dict[str, int]
     # Diagnostic metrics are additive; existing clients can ignore this field.
     class_metrics: dict[str, dict[str, float | int]] = Field(default_factory=dict)
+    # Size of the analysed video in pixels; detections are in these coordinates. Optional for older clients.
+    frame_width: int | None = None
+    frame_height: int | None = None
     detections: list[Detection]
     preview_image: str | None = None
     note: str

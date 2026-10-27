@@ -202,6 +202,8 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
             processing_seconds=round(elapsed, 3),
             average_inference_fps=round(processed / inference_elapsed, 3),
             detections_count=len(detections), class_counts=dict(counts), class_metrics=class_metrics,
+            frame_width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None,
+            frame_height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None,
             detections=detections, preview_image=preview_image,
             note=(
                 "CPU-based sampled-frame detection with ByteTrack IDs. Class diagnostics include "
