@@ -1,0 +1,8 @@
+# Copy to .env.local for local development. Never commit .env.local.
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+# The publishable (anon) key is designed to be public; protect data with RLS, not by hiding it.
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
+# Optional: shown in the upload hint. Match the API limits (MAX_UPLOAD_MB / MAX_VIDEO_SECONDS).
+NEXT_PUBLIC_MAX_UPLOAD_MB=20
+NEXT_PUBLIC_MAX_VIDEO_SECONDS=15

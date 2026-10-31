@@ -1,0 +1,15 @@
+node_modules/
+.next/
+.env
+.env.local
+.env.*.local
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.DS_Store
+# Model weights are ignored, except the small default detector the API needs at runtime.
+*.pt
+*.onnx
+!services/api/yolo11n.pt
+uploads/
