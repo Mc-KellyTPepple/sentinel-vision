@@ -41,3 +41,12 @@ services:
         sync: false
       - key: SUPABASE_PUBLISHABLE_KEY
         sync: false
+      # Evidence keyframes per clip analysis (small JPEGs; 0 turns them off).
+      - key: MAX_KEYFRAMES
+        value: "8"
+      # Optional AI analyst: a free Groq key. Only event text is sent, never video. Without it the
+      # web app answers questions with its built-in analyst.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: llama-3.1-8b-instant

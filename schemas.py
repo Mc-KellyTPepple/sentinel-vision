@@ -11,6 +11,14 @@ class Detection(BaseModel):
     x2: float
     y2: float
     track_id: int | None = None
+    # Approximate main colour of the box (a person's torso). Optional for older clients.
+    color: str | None = None
+
+class Keyframe(BaseModel):
+    t: float
+    frame: int
+    labels: dict[str, int]
+    image: str
 
 class AnalysisSummary(BaseModel):
     filename: str
@@ -29,4 +37,13 @@ class AnalysisSummary(BaseModel):
     frame_height: int | None = None
     detections: list[Detection]
     preview_image: str | None = None
+    # Evidence frames (annotated) where what is visible changes; the video itself is not kept.
+    keyframes: list[Keyframe] = Field(default_factory=list)
+    # Model, thresholds and sampling used, so a report can be reproduced.
+    run_config: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
     note: str
+
+class AskRequest(BaseModel):
+    question: str = Field(default="", max_length=600)
+    context: str = Field(min_length=1, max_length=24000)
+    mode: str = Field(default="answer", pattern="^(answer|summary)$")

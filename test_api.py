@@ -185,3 +185,22 @@ def test_a_failed_warm_up_is_recorded_and_does_not_block_requests(monkeypatch):
     assert inference.warmup["state"] == "failed" and "model file missing" in inference.warmup["error"]
     inference.raise_if_loading()  # must not raise: the first request loads the model instead
     assert not inference.model_lock.locked()
+
+
+def test_ready_reports_optional_features(monkeypatch):
+    monkeypatch.setattr(settings, "groq_api_key", "")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    body = client.get("/ready").json()
+    assert body["ai_assistant"] is False and body["run_config"]["model"] == settings.model_name
+
+
+def test_ask_requires_sign_in_and_a_question(monkeypatch):
+    fake_supabase(monkeypatch, FakeResponse(status=401))
+    assert client.post("/api/v1/ask", json={"question": "hi", "context": "x"}).status_code == 401
+    signed_in()
+    assert client.post("/api/v1/ask", json={"question": " ", "context": "x"}).status_code == 400
+    assert client.post("/api/v1/ask", json={"question": "hi", "context": ""}).status_code == 422
+    monkeypatch.setattr(settings, "groq_api_key", "")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    r = client.post("/api/v1/ask", json={"question": "hi", "context": "x"})
+    assert r.status_code == 503 and "built-in analyst" in r.json()["detail"]

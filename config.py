@@ -25,6 +25,19 @@ class Settings(BaseSettings):
     preload_model: bool = True
     supabase_url: str = ""
     supabase_publishable_key: str = ""
+    # Evidence: annotated keyframes returned with each uploaded-clip analysis (0 turns them off).
+    max_keyframes: int = 8
+    # Optional AI analyst. Any OpenAI-compatible chat API; the default is Groq (free tier). Without a key the
+    # web app answers questions with its built-in analyst.
+    groq_api_key: str = ""
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_model: str = "llama-3.1-8b-instant"
+    ask_per_minute: int = 12
+
+    @property
+    def llm_key(self) -> str:
+        return (self.llm_api_key or self.groq_api_key).strip()
 
     @property
     def cors_origins(self) -> list[str]:

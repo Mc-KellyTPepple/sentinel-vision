@@ -7,6 +7,14 @@ import { Icon } from "./ui";
 
 const COMMON_CLASSES = ["person", "car", "truck", "bus", "bicycle", "motorcycle", "dog", "cat", "backpack", "handbag", "suitcase", "bottle", "cell phone", "laptop", "chair", "couch"];
 
+const BEHAVIOURS: [Exclude<keyof VideoAnalytics["setup"]["behaviour"], "leftBehindSeconds">, string, string][] = [
+  ["running", "Running", "A person moving much faster than walking"],
+  ["falls", "Possible fall", "A standing person who ends up lying down"],
+  ["leftBehind", "Left behind", "A bag or similar object left with nobody near it"],
+  ["removed", "Removed", "An object that sat still and then disappeared"],
+  ["crowd", "Crowd change", "The number of people rises or drops quickly"],
+];
+
 const KIND_LABEL: Record<RuleKind, string> = {
   occupancy: "Crowding: too many objects in a zone",
   loiter: "Loitering: stays in a zone too long",
@@ -115,6 +123,21 @@ export default function SetupPanel({ va }: { va: VideoAnalytics }) {
       </div>
 
       <div className="setup-head" style={{ marginTop: 18 }}>
+        <h3>Behaviour alerts</h3>
+      </div>
+      <p className="subcopy" style={{ margin: "0 0 8px" }}>Estimated from how tracked boxes move. They apply to the live camera and to uploaded clips, and are cues to check, not proof.</p>
+      <ul className="behaviour-list">
+        {BEHAVIOURS.map(([key, title, hint]) => (
+          <li key={key}>
+            <label className="toggle"><input type="checkbox" checked={va.setup.behaviour[key]} onChange={(e) => va.setBehaviour({ [key]: e.target.checked })} /> <span><strong>{title}</strong><small>{hint}</small></span></label>
+          </li>
+        ))}
+      </ul>
+      <label className="behaviour-seconds">Left behind / removed after
+        <input type="number" min={2} max={600} value={va.setup.behaviour.leftBehindSeconds} onChange={(e) => va.setBehaviour({ leftBehindSeconds: Number(e.target.value) })} aria-label="Seconds before an object counts as left behind or removed" /> seconds still
+      </label>
+
+      <div className="setup-head" style={{ marginTop: 18 }}>
         <h3>Alerts and events</h3>
         {va.events.length > 0 && <button type="button" className="small-button" onClick={va.clearEvents}>Clear</button>}
       </div>
@@ -123,9 +146,10 @@ export default function SetupPanel({ va }: { va: VideoAnalytics }) {
       ) : (
         <ul className="event-list">
           {va.events.slice(0, 12).map((e) => (
-            <li key={e.id} className={`ev-${e.kind === "alert" ? e.severity : "info"}`}>
-              <Icon name={e.kind === "alert" ? "bell" : e.kind === "cross" ? "route" : "target"} size={15} />
-              <span>{e.message}</span>
+            <li key={e.id} className={`ev-${e.kind === "alert" || e.kind === "behaviour" ? e.severity : "info"}`}>
+              <Icon name={e.kind === "behaviour" ? "activity" : e.kind === "alert" ? "bell" : e.kind === "cross" ? "route" : "target"} size={15} />
+              <span style={{ flex: 1 }}>{e.message}{e.reason && <small className="ev-reason">Why: {e.reason}</small>}</span>
+              {(e.kind === "alert" || e.kind === "behaviour") && <button type="button" className="icon-button" title="Not an issue: dismiss this alert" aria-label="Dismiss alert" onClick={() => va.dismissEvent(e.id)}><Icon name="x" size={14} /></button>}
             </li>
           ))}
         </ul>

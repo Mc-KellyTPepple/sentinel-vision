@@ -21,6 +21,8 @@ export type Det = {
   y1: number;
   x2: number;
   y2: number;
+  /** Approximate main colour of the box (a person's torso), when the API reports it. */
+  color?: string | null;
 };
 
 /** All detections of one frame. `t` is seconds (video time for clips, wall-clock seconds for live). */
@@ -40,7 +42,7 @@ export type Rule = {
   enabled: boolean;
 };
 
-export type EventKind = "enter" | "exit" | "cross" | "alert";
+export type EventKind = "enter" | "exit" | "cross" | "alert" | "behaviour";
 export type AnalyticsEvent = {
   id: string;
   t: number;
@@ -49,6 +51,8 @@ export type AnalyticsEvent = {
   severity: "info" | "warning" | "critical";
   ruleId?: string;
   trackId?: number;
+  /** Evidence: why it fired (behaviour alerts). */
+  reason?: string;
 };
 
 export type TrackPath = {
@@ -390,6 +394,7 @@ export type SavedDetection = {
   x2: number;
   y2: number;
   track_id: number | null;
+  color?: string | null;
 };
 
 /** Saved analyses do not store the video size, so estimate it from the largest box edge. */
@@ -412,7 +417,7 @@ export function framesFromSaved(rows: SavedDetection[], size = estimateFrameSize
       f = { t: r.timestamp_seconds, width: size.width, height: size.height, detections: [] };
       byFrame.set(r.frame, f);
     }
-    f.detections.push({ track_id: r.track_id, label: r.label, confidence: r.confidence, x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 });
+    f.detections.push({ track_id: r.track_id, label: r.label, confidence: r.confidence, x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2, color: r.color ?? null });
   }
   return [...byFrame.entries()].sort((a, b) => a[0] - b[0]).map(([, f]) => f);
 }

@@ -6,8 +6,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
+from .assistant import ai_configured, ask_llm, check_rate_limit
 from .config import settings
-from .inference import analyze_upload, is_model_loaded, process_live_frame, warm_up, warmup
+from .inference import API_VERSION, analyze_upload, is_model_loaded, process_live_frame, run_config, warm_up, warmup
+from .schemas import AskRequest
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -18,7 +20,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.1.0",
+    version=API_VERSION,
     description="CPU-first video analysis API for Sentinel Vision.",
     lifespan=lifespan,
 )
@@ -42,7 +44,12 @@ def health():
 @app.get("/ready")
 def ready():
     # "detector" is idle (not started), loading, ready, or failed (it then loads on the first request instead).
-    return {"status": "ready", "inference_model_loaded": is_model_loaded(), "detector": warmup["state"], "detector_error": warmup["error"]}
+    return {
+        "status": "ready", "inference_model_loaded": is_model_loaded(), "detector": warmup["state"], "detector_error": warmup["error"],
+        # Optional features the web app can switch on.
+        "ai_assistant": ai_configured(), "ai_model": settings.llm_model if ai_configured() else None,
+        "run_config": run_config(),
+    }
 
 async def require_supabase_user(authorization: str | None = Header(default=None)) -> dict:
     """Validate the caller's access token with Supabase Auth; never trust a client-supplied user ID."""
@@ -92,3 +99,12 @@ async def live_frame(
     if not content or len(content) > MAX_LIVE_FRAME_BYTES:
         raise HTTPException(status_code=413, detail="Camera frame is empty or exceeds the 2 MB limit.")
     return await run_in_threadpool(process_live_frame, content, session_id)
+
+
+@app.post("/api/v1/ask")
+async def ask(request: AskRequest, user: dict = Depends(require_supabase_user)):
+    """Answer a question (or write a summary) from the event data of one analysis. Text only; no video is sent."""
+    if request.mode == "answer" and not request.question.strip():
+        raise HTTPException(status_code=400, detail="Type a question first.")
+    check_rate_limit(str(user.get("id")), max(1, settings.ask_per_minute))
+    return await ask_llm(request.question, request.context, request.mode)
