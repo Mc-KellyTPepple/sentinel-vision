@@ -35,8 +35,10 @@
 .tab-count{font:11px 'DM Mono',monospace;padding:2px 8px;border-radius:99px;background:#ffffff14}
 .tab.active .tab-count{background:#10160c22}
 
-/* analyze: upload + saved analyses on the left, the report fills the rest */
-.analyze-grid{display:grid;grid-template-columns:minmax(340px,430px) minmax(0,1fr);gap:18px;align-items:start}
+/* analyze: two equal columns. Left: upload, saved analyses and the AI Investigator.
+   Right: the report (numbers, heatmap, trajectories, replay, classes, tracks, timeline, detection table). */
+.analyze-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}
+.analyze-inv .inv{margin:0}
 .analyze-left{display:grid;gap:18px;min-width:0}
 .analyze-left .saved-jobs{margin:0;padding:0;border:0}
 .analyze-left .saved-job{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;align-items:center}
