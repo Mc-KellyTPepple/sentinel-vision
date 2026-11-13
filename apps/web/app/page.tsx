@@ -1,21 +1,34 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import AnalysisVisuals from "../components/AnalysisVisuals";
 import CommandCenter from "../components/CommandCenter";
+import Investigator, { type AiInfo } from "../components/Investigator";
 import OverlayStage from "../components/OverlayStage";
 import SetupPanel from "../components/SetupPanel";
 import { Icon } from "../components/ui";
 import { useVideoAnalytics } from "../lib/useVideoAnalytics";
+import { analyzeBatch, estimateFrameSize, framesFromSaved, type FrameData } from "../lib/analytics";
+import { buildTags, investigateClip, matchesSearch, mmss, summarize, type Investigation, type Keyframe } from "../lib/intelligence";
 
 const MAX_UPLOAD_MB = process.env.NEXT_PUBLIC_MAX_UPLOAD_MB || "20";
 const MAX_VIDEO_SECONDS = process.env.NEXT_PUBLIC_MAX_VIDEO_SECONDS || "15";
 type Tab = "overview" | "analyze" | "live" | "incidents";
 
-type Detection = { frame:number; timestamp_seconds:number; class_id:number; label:string; confidence:number; x1:number; y1:number; x2:number; y2:number; track_id:number|null };
-type Incident = { id:string; title:string; description:string|null; severity:"low"|"medium"|"high"|"critical"; status:"open"|"acknowledged"|"resolved"; event_type:string; occurred_at:string; job_id:string };
+type Detection = { frame:number; timestamp_seconds:number; class_id:number; label:string; confidence:number; x1:number; y1:number; x2:number; y2:number; track_id:number|null; color?:string|null };
+type Evidence = { t:number; track_id:number|null; reason:string; message?:string; keyframe?:string|null; keyframe_t?:number|null };
+type Incident = { id:string; title:string; description:string|null; severity:"low"|"medium"|"high"|"critical"; status:"open"|"acknowledged"|"resolved"; event_type:string; occurred_at:string; job_id:string; evidence?:Evidence|null; false_positive?:boolean; resolution_note?:string|null };
+type Job = { id:string; original_filename:string; status:string; created_at:string; detections_count:number; duration_seconds:number|null; frames_processed:number; processing_seconds:number|null; average_inference_fps:number|null; run_config?:Record<string,unknown>|null; summary?:string|null; tags?:string[]|null };
+const JOB_COLUMNS = "id,original_filename,status,created_at,detections_count,duration_seconds,frames_processed,processing_seconds,average_inference_fps";
+const INCIDENT_COLUMNS = "id,title,description,severity,status,event_type,occurred_at,job_id";
+/** True when Supabase reports a column that does not exist yet (migration 008 not applied). */
+const missingColumn = (e:{code?:string;message?:string}|null) => !!e && (e.code==="42703"||e.code==="PGRST204"||/column|schema cache/i.test(e.message||""));
+const BEHAVIOUR_INCIDENTS: Record<string,{title:string;severity:"low"|"medium"|"high"}> = {
+  possible_fall:{title:"Possible fall",severity:"high"}, left_behind:{title:"Object possibly left behind",severity:"high"},
+  removed:{title:"Object possibly removed",severity:"medium"}, crowd_change:{title:"Sudden crowd change",severity:"medium"}, running:{title:"Possible running",severity:"low"},
+};
 type IncidentAudit = { id:string; incident_id:string; user_id:string; previous_status:string; new_status:string; changed_at:string; changed_by:string|null };
 const formatAuditTimestamp = (value:string) => `${new Date(value).toLocaleString("en-GB",{timeZone:"UTC",year:"numeric",month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})} UTC`;
 type Analysis = {
@@ -23,6 +36,7 @@ type Analysis = {
   average_inference_fps:number|null; detections_count:number; class_counts:Record<string,number>;
   detections:Detection[]; preview_image:string|null; note:string;
   frame_width?:number|null; frame_height?:number|null;
+  keyframes?:Keyframe[]; run_config?:Record<string,unknown>|null;
 };
 const API = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 type LiveDetection = { track_id:number|null; label:string; confidence:number; x1:number; y1:number; x2:number; y2:number };
@@ -55,7 +69,21 @@ export default function Home() {
   const [password,setPassword] = useState("");
   const [authBusy,setAuthBusy] = useState(false);
   const [authMessage,setAuthMessage] = useState("");
-  const [jobs,setJobs] = useState<Array<{id:string;original_filename:string;status:string;created_at:string;detections_count:number;duration_seconds:number|null;frames_processed:number;processing_seconds:number|null;average_inference_fps:number|null}>>([]);
+  const [jobs,setJobs] = useState<Job[]>([]);
+  const [aiInfo,setAiInfo] = useState<AiInfo>({available:false,model:null});
+  const [schemaV8,setSchemaV8] = useState(true);
+  const [jobQuery,setJobQuery] = useState("");
+  const [jobResults,setJobResults] = useState<Job[]|null>(null);
+  const [jobSearching,setJobSearching] = useState(false);
+  const [confirmDeleteId,setConfirmDeleteId] = useState<string|null>(null);
+  const [retentionDays,setRetentionDays] = useState(30);
+  const [confirmRetention,setConfirmRetention] = useState(false);
+  const [noteFor,setNoteFor] = useState<string|null>(null);
+  const [noteText,setNoteText] = useState("");
+  const [liveSendWidth,setLiveSendWidth] = useState(640);
+  const liveWidthRef = useRef(640);
+  const liveSlowRef = useRef(0);
+  const liveFastRef = useRef(0);
   const [selectedJobId,setSelectedJobId] = useState<string|null>(null);
   const [loadingSavedJob,setLoadingSavedJob] = useState(false);
   const [loadingSavedJobId,setLoadingSavedJobId] = useState<string|null>(null);
@@ -90,6 +118,22 @@ export default function Home() {
   const [liveLastFrameAt,setLiveLastFrameAt] = useState("");
   useEffect(()=>{setDetectionClassFilter("all");setSelectedTimelineBucket(null);setSelectedTrackId(null);},[selectedJobId,result?.filename,result?.detections_count]);
 
+  async function getToken() {
+    if (!supabase) return null;
+    const {data} = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
+  }
+
+  /** Behaviour, timeline and summary for an analysis, using the current zones, lines, rules and behaviour settings. */
+  function investigationFor(a:Analysis): {inv:Investigation; frames:FrameData[]} {
+    const size = a.frame_width && a.frame_height ? {width:a.frame_width,height:a.frame_height} : estimateFrameSize(a.detections);
+    const frames = framesFromSaved(a.detections,size);
+    const {zones,lines,rules,behaviour} = va.setup;
+    const zoneBatch = zones.length||lines.length ? analyzeBatch(frames,zones,lines,rules) : null;
+    const inv = investigateClip(frames,{name:a.filename,duration:a.duration_seconds,framesProcessed:a.frames_processed,settings:behaviour,runConfig:a.run_config??null,zoneBatch,zones,lines});
+    return {inv,frames};
+  }
+
   async function startLiveCamera() {
     setLiveError(""); setLiveStarting(true);
     try {
@@ -100,6 +144,7 @@ export default function Home() {
       if (liveVideoRef.current) { liveVideoRef.current.srcObject = stream; await liveVideoRef.current.play(); }
       liveSessionIdRef.current = (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       liveSeenTrackIdsRef.current = new Set(); liveConsecutiveErrorsRef.current = 0; liveHadErrorRef.current = false;
+      liveWidthRef.current = 640; liveSlowRef.current = 0; liveFastRef.current = 0; setLiveSendWidth(640);
       resetAnalyticsSession(); setLiveFrame(""); setLiveDetections([]); setLiveFrames(0); setLiveFps(0); setLiveTrackCounts({}); setLiveLastFrameAt(""); setLiveEvents([{id:`start-${Date.now()}`,time:new Date().toLocaleTimeString(),message:"Live camera session started.",kind:"system" as const}]); setLiveProcessedMs(0); setLiveRunning(true);
     } catch(err) { setLiveError(err instanceof Error ? err.message : "Could not start the camera."); liveStreamRef.current?.getTracks().forEach(track=>track.stop()); liveStreamRef.current=null; }
     finally { setLiveStarting(false); }
@@ -118,18 +163,27 @@ export default function Home() {
       const video = liveVideoRef.current, canvas = liveCanvasRef.current;
       if (!video || !canvas || video.readyState < 2 || cancelled) { timeout=setTimeout(processFrame,250); return; }
       const width = video.videoWidth || 640, height = video.videoHeight || 480;
-      canvas.width = Math.min(width,640); canvas.height = Math.round(height * canvas.width / width);
+      // Adaptive frame size: smaller frames when the server or connection is slow, back up when it is fast.
+      canvas.width = Math.min(width,liveWidthRef.current); canvas.height = Math.round(height * canvas.width / width);
       const ctx = canvas.getContext("2d");
       if (!ctx) { setLiveError("Could not prepare a camera frame."); stopLiveCamera(); return; }
       ctx.drawImage(video,0,0,canvas.width,canvas.height);
       const blob:Blob|null = await new Promise(resolve=>canvas.toBlob(resolve,"image/jpeg",0.72));
       if (!blob || cancelled) { timeout=setTimeout(processFrame,250); return; }
+      let pause = 450;
       try {
+        const sentAt = performance.now();
         const body = new FormData(); body.append("file",blob,"webcam.jpg"); body.append("session_id",liveSessionIdRef.current);
         const response = await fetch(`${API}/api/v1/live/frame`,{method:"POST",headers:{Authorization:`Bearer ${session.access_token}`},body});
         if (!response.ok) { const payload=await response.json().catch(()=>({})); throw new Error(payload.detail || `Live inference failed (${response.status}).`); }
         const data:LiveResponse = await response.json();
         if (cancelled) return;
+        const roundTrip = performance.now()-sentAt;
+        if (roundTrip > 2500) { liveSlowRef.current += 1; liveFastRef.current = 0; } else if (roundTrip < 1000) { liveFastRef.current += 1; liveSlowRef.current = 0; }
+        if (liveSlowRef.current >= 3 && liveWidthRef.current > 320) { liveWidthRef.current -= 160; liveSlowRef.current = 0; setLiveSendWidth(liveWidthRef.current); setLiveEvents(old=>[{id:`adapt-${Date.now()}`,time:new Date().toLocaleTimeString(),message:`The server is slow; sending smaller frames (${liveWidthRef.current}px wide) to keep up.`,kind:"system" as const},...old].slice(0,20)); }
+        if (liveFastRef.current >= 6 && liveWidthRef.current < 640) { liveWidthRef.current += 160; liveFastRef.current = 0; setLiveSendWidth(liveWidthRef.current); }
+        // give a busy shared CPU room to breathe instead of queueing frames behind each other
+        pause = (data.processed_ms||0) > 1500 ? 900 : 450;
         setLiveFrame(data.annotated_image || ""); ingest({t:Date.now()/1000,width:data.frame_width||640,height:data.frame_height||480,detections:data.detections||[]}); setLiveDetections(data.detections || []); setLiveFrames(count=>count+1); setLiveProcessedMs(data.processed_ms || 0); setLiveLastFrameAt(new Date().toLocaleTimeString());
         const now=performance.now(); setLiveFps(1000/Math.max(1,now-previous)); previous=now;
         liveConsecutiveErrorsRef.current = 0;
@@ -140,7 +194,7 @@ export default function Home() {
         setLiveTrackCounts(old=>{const next={...old}; for (const d of data.detections || []) { if(d.track_id===null) continue; const key=String(d.track_id), prior=next[key], labelVotes={...(prior?.labelVotes||{})}; labelVotes[d.label]=(labelVotes[d.label]||0)+1; const label=Object.entries(labelVotes).sort((a,b)=>b[1]-a[1]||(a[0]===prior?.label?-1:1))[0]?.[0]||d.label; next[key]={label,labelVotes,count:(prior?.count||0)+1,confidenceTotal:(prior?.confidenceTotal||0)+d.confidence,lastSeen:Date.now()}; } return next;});
         setLiveError("");
       } catch(err) { if (!cancelled) { const message=err instanceof Error ? err.message : "Live inference failed."; setLiveError(message); liveConsecutiveErrorsRef.current += 1; if (!liveHadErrorRef.current) { liveHadErrorRef.current=true; setLiveEvents(old=>[{id:`warning-${Date.now()}`,time:new Date().toLocaleTimeString(),message:`Live inference interrupted: ${message}`,kind:"warning" as const},...old].slice(0,20)); } if (/401|sign in|expired/i.test(message)) stopLiveCamera(); } }
-      const backoff = liveConsecutiveErrorsRef.current ? Math.min(5000,500*Math.pow(2,Math.min(liveConsecutiveErrorsRef.current-1,3))) : 450;
+      const backoff = liveConsecutiveErrorsRef.current ? Math.min(5000,500*Math.pow(2,Math.min(liveConsecutiveErrorsRef.current-1,3))) : pause;
       timeout=setTimeout(processFrame,backoff);
     };
     void processFrame();
@@ -159,12 +213,18 @@ export default function Home() {
 
   async function loadJobs() {
     if (!supabase || !session?.user) return;
-    const {data,error:loadError} = await supabase.from("analysis_jobs").select("id,original_filename,status,created_at,detections_count,duration_seconds,frames_processed,processing_seconds,average_inference_fps").order("created_at",{ascending:false}).limit(5);
+    const full = await supabase.from("analysis_jobs").select(`${JOB_COLUMNS},run_config,summary,tags`).order("created_at",{ascending:false}).limit(5);
+    let data = full.data as Job[]|null, loadError = full.error;
+    if (missingColumn(loadError)) {
+      setSchemaV8(false);
+      const basic = await supabase.from("analysis_jobs").select(JOB_COLUMNS).order("created_at",{ascending:false}).limit(5);
+      data = basic.data as Job[]|null; loadError = basic.error;
+    }
     if (loadError) {
       setSaveNotice(`Could not load saved jobs: ${loadError.message}`);
       autoRestoreAttempted.current = true;
     } else {
-      const savedJobs = data || [];
+      const savedJobs = (data || []) as Job[];
       setJobs(savedJobs);
       // Restore only once per page session, so later refreshes of the job list
       // cannot replace a report the user has just run or explicitly opened.
@@ -179,7 +239,7 @@ export default function Home() {
     }
   }
 
-  async function loadSavedAnalysis(job: {id:string;original_filename:string;duration_seconds:number|null;frames_processed:number;detections_count:number;processing_seconds:number|null;average_inference_fps:number|null}) {
+  async function loadSavedAnalysis(job: Pick<Job,"id"|"original_filename"|"duration_seconds"|"frames_processed"|"detections_count"|"processing_seconds"|"average_inference_fps"> & {run_config?:Record<string,unknown>|null}) {
     if (!supabase || !session?.user) return;
     setLoadingSavedJob(true); setLoadingSavedJobId(job.id); setError(""); setSaveNotice(""); setIncidentNotice("");
     try {
@@ -187,12 +247,12 @@ export default function Home() {
       if (eventsError) throw eventsError;
       const detections: Detection[] = (rows || []).map((row:any) => {
         const box = row.bbox && typeof row.bbox === "object" ? row.bbox : {};
-        return {frame:Number(row.frame_index)||0,timestamp_seconds:Number(row.timestamp_seconds)||0,class_id:0,label:String(row.label),confidence:Number(row.confidence)||0,x1:Number(box.x1)||0,y1:Number(box.y1)||0,x2:Number(box.x2)||0,y2:Number(box.y2)||0,track_id:row.track_id==null?null:Number(row.track_id)};
+        return {frame:Number(row.frame_index)||0,timestamp_seconds:Number(row.timestamp_seconds)||0,class_id:0,label:String(row.label),confidence:Number(row.confidence)||0,x1:Number(box.x1)||0,y1:Number(box.y1)||0,x2:Number(box.x2)||0,y2:Number(box.y2)||0,track_id:row.track_id==null?null:Number(row.track_id),color:typeof box.color==="string"?box.color:null};
       });
       const class_counts:Record<string,number> = {};
       for (const d of detections) class_counts[d.label] = (class_counts[d.label] || 0) + 1;
       const savedBox = (rows || []).find((r:any) => r.bbox && typeof r.bbox === "object" && Number(r.bbox.frame_width) > 0 && Number(r.bbox.frame_height) > 0)?.bbox;
-      setResult({frame_width:savedBox?Number(savedBox.frame_width):null,frame_height:savedBox?Number(savedBox.frame_height):null,filename:job.original_filename,duration_seconds:Number(job.duration_seconds)||0,frames_processed:job.frames_processed||0,processing_seconds:job.processing_seconds,average_inference_fps:job.average_inference_fps,detections_count:job.detections_count||detections.length,class_counts,detections,preview_image:null,note:`Loaded from your saved Supabase records. ${job.average_inference_fps == null || job.processing_seconds == null ? "Performance metrics were not recorded for this older analysis, so those values are shown as unavailable." : "Saved performance metrics were restored for this analysis."} The original video and annotated preview image are not stored; bounding boxes and detection samples were reconstructed from saved metadata.`});
+      setResult({run_config:job.run_config??null,keyframes:[],frame_width:savedBox?Number(savedBox.frame_width):null,frame_height:savedBox?Number(savedBox.frame_height):null,filename:job.original_filename,duration_seconds:Number(job.duration_seconds)||0,frames_processed:job.frames_processed||0,processing_seconds:job.processing_seconds,average_inference_fps:job.average_inference_fps,detections_count:job.detections_count||detections.length,class_counts,detections,preview_image:null,note:`Loaded from your saved Supabase records. ${job.average_inference_fps == null || job.processing_seconds == null ? "Performance metrics were not recorded for this older analysis, so those values are shown as unavailable." : "Saved performance metrics were restored for this analysis."} The original video and annotated preview image are not stored; bounding boxes and detection samples were reconstructed from saved metadata.`});
       setSelectedJobId(job.id);
     } catch(err) { setError(`Could not load this saved analysis: ${err instanceof Error ? err.message : "Unknown database error"}`); }
     finally { setLoadingSavedJob(false); setLoadingSavedJobId(null); }
@@ -200,7 +260,13 @@ export default function Home() {
 
   async function loadIncidents() {
     if (!supabase || !session?.user) return;
-    const {data,error:incidentError} = await supabase.from("incidents").select("id,title,description,severity,status,event_type,occurred_at,job_id").order("occurred_at",{ascending:false}).limit(20);
+    const full = await supabase.from("incidents").select(`${INCIDENT_COLUMNS},evidence,false_positive,resolution_note`).order("occurred_at",{ascending:false}).limit(20);
+    let data = full.data as Incident[]|null, incidentError = full.error;
+    if (missingColumn(incidentError)) {
+      setSchemaV8(false);
+      const basic = await supabase.from("incidents").select(INCIDENT_COLUMNS).order("occurred_at",{ascending:false}).limit(20);
+      data = basic.data as Incident[]|null; incidentError = basic.error;
+    }
     if (incidentError) setIncidentNotice(`Could not load incidents: ${incidentError.message}`);
     else setIncidents((data || []) as Incident[]);
   }
@@ -224,13 +290,14 @@ export default function Home() {
     } finally { setAuditLoadingId(null); }
   }
 
-  async function updateIncident(id:string,status:"acknowledged"|"resolved") {
+  async function updateIncident(id:string,status:"acknowledged"|"resolved",review?:{falsePositive:boolean;note:string}) {
     if (!supabase) return;
     const now = new Date().toISOString();
-    const patch = status === "acknowledged" ? {status,acknowledged_at:now} : {status,resolved_at:now};
+    const patch:Record<string,unknown> = status === "acknowledged" ? {status,acknowledged_at:now} : {status,resolved_at:now};
+    if (review) { patch.false_positive = review.falsePositive; patch.resolution_note = review.note.trim().slice(0,500) || null; }
     const {error:updateError} = await supabase.from("incidents").update(patch).eq("id",id);
-    if (updateError) setIncidentNotice(`Could not update incident: ${updateError.message}`);
-    else { setIncidentNotice(status === "acknowledged" ? "Incident acknowledged." : "Incident resolved."); await loadIncidents(); if (auditOpenId===id) { setAuditOpenId(null); await loadIncidentAudit(id); } }
+    if (updateError) setIncidentNotice(missingColumn(updateError) ? "Marking false alarms and saving notes needs database migration 008. Run it in the Supabase SQL editor, then try again." : `Could not update incident: ${updateError.message}`);
+    else { setNoteFor(null); setNoteText(""); setIncidentNotice(review?.falsePositive ? "Marked as a false alarm and closed. Thanks: this helps you tune your rules and thresholds." : status === "acknowledged" ? "Incident acknowledged." : "Incident resolved."); await loadIncidents(); if (auditOpenId===id) { setAuditOpenId(null); await loadIncidentAudit(id); } }
   }
 
   async function authenticate(e:FormEvent<HTMLFormElement>) {
@@ -267,16 +334,23 @@ export default function Home() {
 
   async function persistAnalysis(data:Analysis) {
     if (!supabase || !session?.user) { setSaveNotice("Analysis completed, but it was not saved. Sign in to save future analysis results."); return; }
-    const {data:job,error:jobError} = await supabase.from("analysis_jobs").insert({
+    const {inv} = investigationFor(data);
+    const baseJob = {
       user_id:session.user.id, original_filename:data.filename, status:"completed", progress:100,
       duration_seconds:data.duration_seconds, frames_processed:data.frames_processed,
       detections_count:data.detections_count, processing_seconds:data.processing_seconds, average_inference_fps:data.average_inference_fps, completed_at:new Date().toISOString()
-    }).select("id").single();
+    };
+    // Summary, tags and settings make saved analyses searchable and reproducible (needs migration 008).
+    let {data:job,error:jobError} = await supabase.from("analysis_jobs").insert({...baseJob,summary:summarize(inv),tags:buildTags(inv),run_config:data.run_config??null}).select("id").single();
+    if (missingColumn(jobError)) {
+      setSchemaV8(false);
+      ({data:job,error:jobError} = await supabase.from("analysis_jobs").insert(baseJob).select("id").single());
+    }
     if (jobError || !job) { setSaveNotice(`Analysis succeeded, but saving the job failed: ${jobError?.message || "Unknown database error"}`); return; }
     const rows = data.detections.map(d => ({
       job_id:job.id, user_id:session.user.id, event_type:d.label, label:d.label,
       confidence:d.confidence, frame_index:d.frame, timestamp_seconds:d.timestamp_seconds,
-      bbox:{x1:d.x1,y1:d.y1,x2:d.x2,y2:d.y2,...(data.frame_width&&data.frame_height?{frame_width:data.frame_width,frame_height:data.frame_height}:{})}, track_id:d.track_id
+      bbox:{x1:d.x1,y1:d.y1,x2:d.x2,y2:d.y2,...(d.color?{color:d.color}:{}),...(data.frame_width&&data.frame_height?{frame_width:data.frame_width,frame_height:data.frame_height}:{})}, track_id:d.track_id
     }));
     for (let i=0; i<rows.length; i+=100) {
       const {error:eventsError} = await supabase.from("detection_events").insert(rows.slice(i,i+100));
@@ -312,9 +386,71 @@ export default function Home() {
         }
       }
     }
+    // Behaviour incidents (possible falls, left-behind or removed objects, crowd changes, running), each with its evidence.
+    const nearestKeyframe = (t:number) => (data.keyframes||[]).reduce<Keyframe|null>((best,k)=>Math.abs(k.t-t)<=3&&(!best||Math.abs(k.t-t)<Math.abs(best.t-t))?k:best,null);
+    const seenBehaviour = new Set<string>();
+    const behaviourRows = inv.behaviour.filter(e=>BEHAVIOUR_INCIDENTS[e.kind]).filter(e=>{const key=`${e.kind}-${e.trackId??e.t}`;if(seenBehaviour.has(key))return false;seenBehaviour.add(key);return true;}).slice(0,10).map(e=>{
+      const spec = BEHAVIOUR_INCIDENTS[e.kind], kf = nearestKeyframe(e.t);
+      const what = e.label ? `${e.label}${e.trackId!==undefined?` #${e.trackId}`:""}` : `at ${mmss(e.t)}`;
+      return {job_id:job.id,user_id:session.user.id,title:`${spec.title}: ${what}`,description:`${e.message} At ${mmss(e.t)} in the clip. Why: ${e.reason} Automatically estimated from detections; review the evidence before taking action.`,severity:spec.severity,status:"open",event_type:e.kind,occurred_at:new Date(e.t*1000 + Date.now() - data.duration_seconds*1000).toISOString(),
+        evidence:{t:e.t,track_id:e.trackId??null,reason:e.reason,message:e.message,keyframe:kf?.image??null,keyframe_t:kf?.t??null}};
+    });
+    if (behaviourRows.length) {
+      let {error:behaviourError} = await supabase.from("incidents").insert(behaviourRows);
+      if (missingColumn(behaviourError)) { setSchemaV8(false); ({error:behaviourError} = await supabase.from("incidents").insert(behaviourRows.map(({evidence:_e,...row})=>row))); }
+      incidentMessage += behaviourError ? ` Behaviour incidents could not be saved: ${behaviourError.message}.` : ` Created ${behaviourRows.length} behaviour incident${behaviourRows.length===1?"":"s"} with evidence.`;
+    }
     setSaveNotice(`Saved this analysis and ${rows.length} detections to your Supabase account. ${incidentMessage}`);
     setSelectedJobId(job.id);
     await loadJobs(); await loadIncidents();
+  }
+
+  /** Search past analyses by what they contain ("person in red", "bag left behind", "cat"), not only by file name. */
+  async function searchJobs(e?:FormEvent) {
+    e?.preventDefault();
+    if (!supabase || !session?.user) return;
+    const q = jobQuery.trim();
+    if (!q) { setJobResults(null); return; }
+    setJobSearching(true);
+    const full = await supabase.from("analysis_jobs").select(`${JOB_COLUMNS},run_config,summary,tags`).order("created_at",{ascending:false}).limit(200);
+    let data = full.data as Job[]|null, searchError = full.error;
+    if (missingColumn(searchError)) {
+      setSchemaV8(false);
+      const basic = await supabase.from("analysis_jobs").select(JOB_COLUMNS).order("created_at",{ascending:false}).limit(200);
+      data = basic.data as Job[]|null; searchError = basic.error;
+    }
+    setJobSearching(false);
+    if (searchError) { setSaveNotice(`Search failed: ${searchError.message}`); return; }
+    setJobResults(((data||[]) as Job[]).filter(j=>matchesSearch(q,{filename:j.original_filename,summary:j.summary,tags:j.tags})));
+  }
+
+  async function afterDeletion(ids:string[]) {
+    if (selectedJobId && ids.includes(selectedJobId)) { setResult(null); setSelectedJobId(null); }
+    setJobResults(r=>r?r.filter(j=>!ids.includes(j.id)):r);
+    autoRestoreAttempted.current = true;
+    await loadJobs(); await loadIncidents();
+  }
+
+  /** Delete one saved analysis with its detections and incidents (privacy: nothing is kept that you do not want). */
+  async function deleteJob(id:string) {
+    if (!supabase) return;
+    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+    setConfirmDeleteId(null);
+    const {data,error:deleteError} = await supabase.from("analysis_jobs").delete().eq("id",id).select("id");
+    if (deleteError) setSaveNotice(`Could not delete: ${deleteError.message}`);
+    else if (!data?.length) setSaveNotice("Nothing was deleted. Deleting saved analyses needs database migration 008 (it adds the delete permission).");
+    else { setSaveNotice("Deleted the analysis with its detections and incidents."); await afterDeletion([id]); }
+  }
+
+  async function applyRetention() {
+    if (!supabase || !session?.user) return;
+    if (!confirmRetention) { setConfirmRetention(true); return; }
+    setConfirmRetention(false);
+    const days = Math.max(1, Math.min(3650, Math.round(retentionDays)));
+    const cutoff = new Date(Date.now() - days*86400000).toISOString();
+    const {data,error:deleteError} = await supabase.from("analysis_jobs").delete().eq("user_id",session.user.id).lt("created_at",cutoff).select("id");
+    if (deleteError) setSaveNotice(`Could not apply retention: ${deleteError.message}`);
+    else { setSaveNotice(data?.length ? `Deleted ${data.length} analys${data.length===1?"is":"es"} older than ${days} days.` : `No saved analyses are older than ${days} days${schemaV8?"":" (or migration 008, which allows deleting, has not been run)"}.`); if (data?.length) await afterDeletion(data.map(r=>r.id as string)); }
   }
 
   async function checkApi() {
@@ -330,6 +466,12 @@ export default function Home() {
       apiFailsRef.current += 1; setApiStatus(apiFailsRef.current <= 9 ? "waking" : "offline");
     } finally { clearTimeout(timeout); setApiCheckedAt(new Date().toLocaleTimeString()); }
   }
+  useEffect(()=>{
+    if (apiStatus!=="online") return;
+    let active = true;
+    fetch(`${API}/ready`,{cache:"no-store"}).then(r=>r.ok?r.json():null).then(d=>{ if(active&&d) setAiInfo({available:!!d.ai_assistant,model:d.ai_model??null}); }).catch(()=>{});
+    return ()=>{active=false;};
+  },[apiStatus]);
   useEffect(()=>{ let active=true; const check=async()=>{ if(!active)return; await checkApi(); }; void check(); const interval=setInterval(()=>{void check();},10000); return ()=>{active=false;clearInterval(interval);}; },[]);
   async function analyze(e:FormEvent<HTMLFormElement>) {
     e.preventDefault(); if (!file) return;
@@ -352,6 +494,10 @@ export default function Home() {
     } catch(err) { setError(err instanceof Error ? err.message : "Could not reach the API"); }
     finally { setBusy(false); }
   }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const clipInvestigation = useMemo(()=>result?investigationFor(result):null,[result,va.setup]);
+  const liveInvestigation = useMemo(()=>va.liveInvestigation(),[va.snapshot,va.events,va.liveInvestigation]);
 
   const timelineBucketCount = 24;
   const trackSummaries = result ? Array.from(result.detections.reduce((map,d)=>{
@@ -389,8 +535,8 @@ export default function Home() {
     {!(authReady && session) && <section className="hero">
       <div className="eyebrow"><span className="pulse" /> REAL-TIME AI VIDEO INTELLIGENCE</div>
       <h1>See the events<br/><span className="gradient">that matter.</span></h1>
-      <p className="hero-copy">Track objects live through your camera, draw zones and counting lines, get rule-based alerts, and replay what happened, powered by YOLO11 detection and ByteTrack tracking.</p>
-      <div className="landing-features"><span><Icon name="target" size={15}/> Live tracking</span><span><Icon name="polygon" size={15}/> Zones and rules</span><span><Icon name="flame" size={15}/> Heatmaps and replay</span><span><Icon name="shield" size={15}/> Incident audit trail</span></div>
+      <p className="hero-copy">Track objects live through your camera, draw zones and counting lines, get rule-based and behaviour alerts, replay what happened, and ask questions about any video, powered by YOLO11 detection and ByteTrack tracking.</p>
+      <div className="landing-features"><span><Icon name="target" size={15}/> Live tracking</span><span><Icon name="polygon" size={15}/> Zones and rules</span><span><Icon name="flame" size={15}/> Heatmaps and replay</span><span><Icon name="shield" size={15}/> Incident audit trail</span><span><Icon name="eye" size={15}/> AI investigator</span></div>
     </section>}
     {!(authReady && session) && <section className="auth-panel">
       <div className="auth-heading"><div><span className="step">ACCOUNT</span><h2>{session ? "Your Sentinel Vision account" : "Sign in to access Sentinel Vision"}</h2></div><span className="pill">Supabase Auth</span></div>
@@ -429,7 +575,7 @@ export default function Home() {
         />
       </div>
       <div className="panel live-panel" hidden={tab!=="live"}>
-        <div className="panel-heading"><div><span className="step">LIVE</span><h2>Live operations</h2></div><span className="pill">{liveStarting?"Starting":liveRunning?(liveError?"Reconnecting":"Live") : "Stopped · last results retained"}</span></div>
+        <div className="panel-heading"><div><span className="step">LIVE</span><h2>Live operations</h2></div><span className="pill">{liveStarting?"Starting":liveRunning?(liveFrames===0?"Waiting for first frame":liveError?"Reconnecting":"Live") : "Stopped · last results retained"}</span></div>
         <p className="subcopy">Track objects through your webcam in near real time. Draw zones and counting lines on the video and add alert rules. Frames are sent to the Sentinel Vision API for inference; they are not saved as an analysis or uploaded to Supabase.</p>
         <div className="live-layout">
           <div className="live-main">
@@ -456,6 +602,7 @@ export default function Home() {
               <video ref={liveVideoRef} className="stage-media" muted playsInline autoPlay style={{display:liveRunning?"block":"none"}} />
               {liveRunning && liveFrame && <img className="stage-media" src={liveFrame} alt="Latest live webcam frame annotated with detected objects and track IDs" style={{pointerEvents:"none"}} />}
               {!liveRunning && <div className="stage-empty"><strong>Camera is stopped</strong><span>Start the camera to begin live detection. Zones and lines you draw are remembered.</span></div>}
+              {liveRunning && liveFrames===0 && <div className="stage-hint" role="status"><span className="hint-dot" aria-hidden="true"/><div><strong>{liveError?"The detector is starting up":"Connecting to the detector"}</strong><span>After the server wakes up, the detector needs about a minute to load. This happens once per wake-up; the first results appear by themselves.</span></div></div>}
               {liveRunning && <span className="live-badge"><i />LIVE</span>}
             </OverlayStage>
             <div className="live-toolbar">
@@ -473,13 +620,16 @@ export default function Home() {
               <div className="metric"><span>API latency</span><strong>{liveRunning?`${liveProcessedMs.toFixed(0)} ms`:"—"}</strong></div>
               <div className="metric"><span>Frames analyzed</span><strong>{liveFrames}</strong></div>
             </div>
-            {liveError&&<div className="error">{liveError}</div>}
+            {liveError&&!(liveFrames===0&&/starting up/i.test(liveError))&&<div className="error">{liveError}</div>}
             {!liveRunning&&(liveDetections.length>0||liveLastFrameAt)&&<p className="subcopy" style={{margin:0}}>Showing stale session results from {liveLastFrameAt||"the last camera run"}; these are not current live detections.</p>}
             {liveRunning&&liveError&&<p className="subcopy" style={{margin:0}}>Latest successful frame: {liveLastFrameAt||"none yet"}. Results may be stale until the connection recovers.</p>}
-            <p className="privacy-note" style={{margin:0}}>Tracking IDs are temporary and may change if objects disappear or tracking is restarted. Browser camera permission is required. The hosted demo runs on a small shared CPU, so each frame can take a few seconds. Last frame: {liveLastFrameAt||"—"} · loop {liveRunning?`${liveFps.toFixed(1)} FPS`:"—"} · {!liveRunning?"stopped":liveError?"retrying":"connected"}.</p>
+            <p className="privacy-note" style={{margin:0}}>Tracking IDs are temporary and may change if objects disappear or tracking is restarted. Browser camera permission is required. The hosted demo runs on a small shared CPU, so each frame can take a few seconds. Last frame: {liveLastFrameAt||"—"} · loop {liveRunning?`${liveFps.toFixed(1)} FPS`:"—"} · frames sent at {liveSendWidth}px (adapts to server speed) · {!liveRunning?"stopped":liveFrames===0?"waiting for first frame":liveError?"retrying":"connected"}.</p>
           </div>
           <div className="live-side">
             <div className="card"><SetupPanel va={va} /></div>
+            <details className="fold"><summary>Ask about this session</summary><div>
+              <Investigator compact inv={liveInvestigation} api={API} getToken={getToken} ai={aiInfo} />
+            </div></details>
             <details className="fold"><summary>Current detections ({liveDetections.length})</summary><div>
               {!liveDetections.length?<p className="subcopy" style={{margin:0}}>No objects detected in the latest frame, or the camera has not started.</p>:<div className="class-list">{liveDetections.map((d,i)=><div className="class-row" key={`${d.track_id}-${d.label}-${i}`}><span>{d.label}{d.track_id!==null?` · Track #${d.track_id}`:" · untracked"}</span><strong>{(d.confidence*100).toFixed(1)}%</strong></div>)}</div>}
             </div></details>
@@ -510,9 +660,23 @@ export default function Home() {
         <div className="privacy-note"><span>◈</span> Video clips are processed temporarily. Saved analyses retain metadata and detection coordinates, not the original video file or annotated preview.</div>
       </div>
       {saveNotice && <p className="save-notice">{saveNotice}</p>}
-      {jobs.length > 0 && <div className="panel"><div className="saved-jobs"><h3>Recent saved analyses</h3>{jobs.map(job=><div className="saved-job" key={job.id}><span><strong>{job.original_filename}</strong><small>{new Date(job.created_at).toLocaleString()}</small></span><span>{job.detections_count} detections · {job.status}</span><button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id ? "Loading…" : selectedJobId===job.id ? "Viewing" : "Open report"}</button></div>)}</div></div>}
+      {(jobs.length > 0 || jobResults) && <div className="panel"><div className="saved-jobs">
+        <h3>{jobResults ? `Search results (${jobResults.length})` : "Recent saved analyses"}</h3>
+        <form className="job-search" onSubmit={e=>void searchJobs(e)}>
+          <input value={jobQuery} onChange={e=>{setJobQuery(e.target.value); if(!e.target.value.trim()) setJobResults(null);}} placeholder="Search by content, e.g. “person in red”, “bag left behind”" aria-label="Search saved analyses" />
+          <button className="small-button" type="submit" disabled={jobSearching}>{jobSearching?"Searching…":"Search"}</button>
+          {jobResults&&<button className="small-button" type="button" onClick={()=>{setJobQuery("");setJobResults(null);}}>Clear</button>}
+        </form>
+        {jobResults&&!jobResults.length&&<p className="subcopy" style={{margin:"4px 0"}}>No saved analysis matches. {schemaV8?"Analyses saved before this update can only be found by file name.":"Run database migration 008 to search by content; until then only file names are searched."}</p>}
+        {(jobResults??jobs).map(job=><div className="saved-job" key={job.id}><span><strong>{job.original_filename}</strong><small>{new Date(job.created_at).toLocaleString()}</small>{job.summary&&<small title={job.summary}>{job.summary.length>120?job.summary.slice(0,118)+"…":job.summary}</small>}</span><span>{job.detections_count} detections · {job.status}</span><span style={{display:"flex",gap:6}}><button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id ? "Loading…" : selectedJobId===job.id ? "Viewing" : "Open report"}</button><button className={`small-button${confirmDeleteId===job.id?" danger":""}`} type="button" onClick={()=>void deleteJob(job.id)} onBlur={()=>setConfirmDeleteId(c=>c===job.id?null:c)} title="Delete this analysis, its detections and incidents">{confirmDeleteId===job.id?"Confirm delete":<Icon name="trash" size={14}/>}</button></span></div>)}
+        <div className="retention"><Icon name="clock" size={14}/> Data retention: delete analyses older than <input type="number" min={1} max={3650} value={retentionDays} onChange={e=>{setRetentionDays(Number(e.target.value));setConfirmRetention(false);}} aria-label="Days to keep analyses"/> days <button type="button" className={`small-button${confirmRetention?" danger":""}`} onClick={()=>void applyRetention()} onBlur={()=>setConfirmRetention(false)}>{confirmRetention?"Confirm: delete permanently":"Apply now"}</button></div>
+      </div></div>}
+      {/* The AI Investigator sits under the upload so both columns carry a similar amount (13 Nov 2026) */}
+      {result&&clipInvestigation&&<div className="analyze-inv">
+        <Investigator key={`${selectedJobId||"new"}-${result.filename}-${result.detections_count}`} inv={clipInvestigation.inv} keyframes={result.keyframes||[]} frames={clipInvestigation.frames} api={API} getToken={getToken} ai={aiInfo} />
+      </div>}
       </div>
-      <div className="panel">
+      <div className="panel analyze-right">
         <div className="panel-heading"><div><span className="step">02</span><h2>Analysis report</h2></div><span className="pill">{busy?"Processing":result?(selectedJobId?"Saved report":"Complete"):"Awaiting video"}</span></div>
         {!result&&!busy&&!loadingSavedJob&&<div className="empty-state"><div className="empty-icon">⌁</div><strong>{jobs.length ? "Choose a saved analysis or upload a video" : "Your results will appear here"}</strong><p>{jobs.length ? "Your most recent saved analysis is restored automatically when available. Choose any saved report above, or run a new analysis." : "No saved analyses yet. Upload a video and run an analysis to see detected objects and performance metrics."}</p></div>}
         {loadingSavedJob&&<div className="empty-state"><span className="spinner large"/><strong>Loading saved report</strong><p>Restoring saved detections and metadata from Supabase.</p></div>}
@@ -573,10 +737,11 @@ export default function Home() {
       </div>
       <section className="panel incidents-panel" hidden={tab!=="incidents"}>
         <div className="panel-heading"><div><span className="step">03</span><h2>Incident management</h2></div><span className="pill">{incidents.filter(i=>i.status!=="resolved").length} active</span></div>
-        <p className="subcopy">Incidents are generated when an object class appears in at least 50% of analyzed frames. High severity means at least 80%. These are review cues, not proof of a security event.</p>
+        <p className="subcopy">Incidents come from uploaded clips: an object class seen in at least 50% of analysed frames (high severity at 80%), and behaviour alerts such as possible falls or objects left behind, each with its evidence. They are review cues, not proof of a security event. Mark wrong ones as false alarms.</p>
+        {!schemaV8&&<p className="save-notice" style={{color:"var(--amber)"}}>Run database migration 008 in Supabase to keep evidence frames with incidents, mark false alarms, search analyses by content and delete old analyses.</p>}
         {incidentNotice && <p className="save-notice">{incidentNotice}</p>}
         <div className="incident-filters" style={{display:"flex",gap:8,flexWrap:"wrap",margin:"14px 0"}}>{(["all","open","acknowledged","resolved"] as const).map(status=><button key={status} type="button" className="small-button" aria-pressed={incidentFilter===status} onClick={()=>setIncidentFilter(status)} style={{opacity:incidentFilter===status?1:.65,fontWeight:incidentFilter===status?700:400}}>{status==="all"?`All (${incidents.length})`:`${status[0].toUpperCase()+status.slice(1)} (${incidents.filter(i=>i.status===status).length})`}</button>)}</div>
-        {incidents.length===0 ? <div className="empty-state"><strong>No incidents yet</strong><p>Analyze a clip to create sustained-detection incidents, or check your Supabase incident-write policy.</p></div> : (()=>{const visible=incidents.filter(i=>incidentFilter==="all"||i.status===incidentFilter);const groups=Array.from(visible.reduce((map,i)=>{const key=i.job_id||"unknown";if(!map.has(key))map.set(key,[]);map.get(key)!.push(i);return map;},new Map<string,Incident[]>()));return visible.length===0?<div className="empty-state"><strong>No {incidentFilter} incidents</strong><p>Choose another status filter to see more incidents.</p></div>:<div className="incident-groups">{groups.map(([jobId,items],groupIndex)=>{const job=jobs.find(j=>j.id===jobId);return <details key={jobId} className="incident-group" open={groupIndex===0}><summary className="incident-group-heading"><div><h3 style={{marginBottom:4}}>{job?.original_filename||"Saved analysis"}</h3><small>{items.length} incident{items.length===1?"":"s"} · {items.filter(i=>i.status==="open").length} open · {new Date(items[0].occurred_at).toLocaleString()}</small></div>{job&&<button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id?"Loading…":selectedJobId===job.id?"Viewing report":"Open analysis report"}</button>}</summary><div className="incident-list">{items.map(incident=><article className="incident-card" key={incident.id}><div className="incident-top"><div><span className={`incident-severity ${incident.severity}`}>{incident.severity}</span><h3>{incident.title}</h3></div><span className={`incident-status ${incident.status}`}>{incident.status}</span></div>{incident.description&&<p title={incident.description}>{(()=>{const first=incident.description.split(". ")[0];return first.endsWith(".")?first:first+".";})()}</p>}<small>{new Date(incident.occurred_at).toLocaleString()}</small><div className="incident-actions">{incident.status==="open"&&<button className="small-button" onClick={()=>void updateIncident(incident.id,"acknowledged")}>Acknowledge</button>}{incident.status!=="resolved"&&<button className="small-button" onClick={()=>void updateIncident(incident.id,"resolved")}>Resolve</button>}<button className="small-button" type="button" onClick={()=>void loadIncidentAudit(incident.id)}>{auditLoadingId===incident.id?"Loading history…":auditOpenId===incident.id?"Hide audit history":"View audit history"}</button></div>{auditOpenId===incident.id&&<div style={{marginTop:10,padding:12,border:"1px solid var(--border, #334155)",borderRadius:8}}><strong>Status change history</strong><p className="subcopy" style={{margin:"6px 0",overflowWrap:"anywhere"}}>Incident ID: <code>{incident.id}</code></p>{auditLoadingId===incident.id?<p className="subcopy">Loading history…</p>:auditErrorByIncident[incident.id]?<p role="alert" style={{marginBottom:0}}>{auditErrorByIncident[incident.id]}</p>:(auditByIncident[incident.id]||[]).length===0?<p className="subcopy" style={{marginBottom:0}}>No status changes have been recorded for this incident yet.</p>:<ol style={{paddingLeft:20,marginBottom:0}}>{(auditByIncident[incident.id]||[]).map(entry=><li key={entry.id} style={{marginBottom:8}}><strong>{entry.previous_status} → {entry.new_status}</strong><div className="subcopy">{formatAuditTimestamp(entry.changed_at)} · User {entry.user_id.slice(0,8)}{entry.changed_by&&entry.changed_by!==entry.user_id?` · Actor ${entry.changed_by.slice(0,8)}`:""}</div></li>)}</ol>}</div>}</article>)}</div></details>})}</div>})()}
+        {incidents.length===0 ? <div className="empty-state"><strong>No incidents yet</strong><p>Analyze a clip to create sustained-detection incidents, or check your Supabase incident-write policy.</p></div> : (()=>{const visible=incidents.filter(i=>incidentFilter==="all"||i.status===incidentFilter);const groups=Array.from(visible.reduce((map,i)=>{const key=i.job_id||"unknown";if(!map.has(key))map.set(key,[]);map.get(key)!.push(i);return map;},new Map<string,Incident[]>()));return visible.length===0?<div className="empty-state"><strong>No {incidentFilter} incidents</strong><p>Choose another status filter to see more incidents.</p></div>:<div className="incident-groups">{groups.map(([jobId,items],groupIndex)=>{const job=jobs.find(j=>j.id===jobId);return <details key={jobId} className="incident-group" open={groupIndex===0}><summary className="incident-group-heading"><div><h3 style={{marginBottom:4}}>{job?.original_filename||"Saved analysis"}</h3><small>{items.length} incident{items.length===1?"":"s"} · {items.filter(i=>i.status==="open").length} open · {new Date(items[0].occurred_at).toLocaleString()}</small></div>{job&&<button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id?"Loading…":selectedJobId===job.id?"Viewing report":"Open analysis report"}</button>}</summary><div className="incident-list">{items.map(incident=><article className="incident-card" key={incident.id}><div className="incident-top"><div><span className={`incident-severity ${incident.severity}`}>{incident.severity}</span><h3>{incident.title}</h3></div><span className={`incident-status ${incident.status}`}>{incident.status}</span></div>{incident.description&&<p title={incident.description}>{(()=>{const first=incident.description.split(". ")[0];return first.endsWith(".")?first:first+".";})()}</p>}{incident.evidence&&<div className="incident-evidence">{incident.evidence.keyframe&&<img src={incident.evidence.keyframe} alt={`Evidence frame near ${mmss(incident.evidence.keyframe_t??incident.evidence.t)}`}/>}<span><strong>Evidence:</strong> {mmss(incident.evidence.t)} in the clip{incident.evidence.track_id!=null?` · track #${incident.evidence.track_id}`:""}. {incident.evidence.reason}</span></div>}{incident.false_positive&&<span className="false-alarm">False alarm</span>}{incident.resolution_note&&<p className="subcopy" style={{margin:"6px 0"}}>Note: {incident.resolution_note}</p>}<small>{new Date(incident.occurred_at).toLocaleString()}</small><div className="incident-actions">{incident.status==="open"&&<button className="small-button" onClick={()=>void updateIncident(incident.id,"acknowledged")}>Acknowledge</button>}{incident.status!=="resolved"&&<button className="small-button" onClick={()=>void updateIncident(incident.id,"resolved",noteFor===incident.id&&noteText.trim()?{falsePositive:false,note:noteText}:undefined)}>Resolve</button>}{incident.status!=="resolved"&&<button className="small-button" type="button" onClick={()=>{setNoteFor(noteFor===incident.id?null:incident.id);setNoteText("");}}>{noteFor===incident.id?"Cancel":"False alarm…"}</button>}<button className="small-button" type="button" onClick={()=>void loadIncidentAudit(incident.id)}>{auditLoadingId===incident.id?"Loading history…":auditOpenId===incident.id?"Hide audit history":"View audit history"}</button></div>{noteFor===incident.id&&<div><input className="note-input" value={noteText} onChange={e=>setNoteText(e.target.value)} maxLength={500} placeholder="Optional note, e.g. “staff member's bag”, “reflection on the glass”" aria-label="Review note"/><div className="incident-actions"><button className="small-button danger" type="button" onClick={()=>void updateIncident(incident.id,"resolved",{falsePositive:true,note:noteText})}>Mark as false alarm and close</button></div><p className="subcopy" style={{margin:"4px 0 0"}}>If the same false alarm keeps coming back, raise the threshold or switch that behaviour off in Live operations → Behaviour alerts.</p></div>}{auditOpenId===incident.id&&<div style={{marginTop:10,padding:12,border:"1px solid var(--border, #334155)",borderRadius:8}}><strong>Status change history</strong><p className="subcopy" style={{margin:"6px 0",overflowWrap:"anywhere"}}>Incident ID: <code>{incident.id}</code></p>{auditLoadingId===incident.id?<p className="subcopy">Loading history…</p>:auditErrorByIncident[incident.id]?<p role="alert" style={{marginBottom:0}}>{auditErrorByIncident[incident.id]}</p>:(auditByIncident[incident.id]||[]).length===0?<p className="subcopy" style={{marginBottom:0}}>No status changes have been recorded for this incident yet.</p>:<ol style={{paddingLeft:20,marginBottom:0}}>{(auditByIncident[incident.id]||[]).map(entry=><li key={entry.id} style={{marginBottom:8}}><strong>{entry.previous_status} → {entry.new_status}</strong><div className="subcopy">{formatAuditTimestamp(entry.changed_at)} · User {entry.user_id.slice(0,8)}{entry.changed_by&&entry.changed_by!==entry.user_id?` · Actor ${entry.changed_by.slice(0,8)}`:""}</div></li>)}</ol>}</div>}</article>)}</div></details>})}</div>})()}
       </section>
     </section> : <section className="panel access-panel">
       <div className="panel-heading"><div><span className="step">ACCESS</span><h2>{authReady ? "Sign in to access video analysis" : "Checking account access"}</h2></div><span className="pill">Account required</span></div>
