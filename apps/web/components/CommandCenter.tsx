@@ -33,7 +33,9 @@ const FEATURES: { icon: IconName; title: string; text: string }[] = [
   { icon: "target", title: "Real-time tracking", text: "YOLO11 detection with persistent ByteTrack IDs on live webcam frames and uploaded clips." },
   { icon: "polygon", title: "Zones, lines and rules", text: "Draw zones and counting lines on the video, count by direction, and raise alerts for crowding, loitering and crossings." },
   { icon: "flame", title: "Heatmaps and replay", text: "See where activity happens, follow trajectories, and replay a saved analysis from its detections." },
-  { icon: "shield", title: "Incident audit trail", text: "Sustained detections become reviewable incidents, with every status change recorded in an append-only history." },
+  { icon: "shield", title: "Incident audit trail", text: "Sustained detections and behaviour alerts become reviewable incidents with evidence, false-alarm marking and an append-only history." },
+  { icon: "eye", title: "AI investigator", text: "Ask questions about a video or the live session, get a summary and an event timeline, and export an evidence report." },
+  { icon: "activity", title: "Behaviour alerts", text: "Running, possible falls, objects left behind or removed, and sudden crowd changes, each with the reason it fired." },
 ];
 
 export default function CommandCenter({ jobs, incidents, apiStatus, apiLatencyMs, live, setup, onOpenJob, onGoto, onStartLive }: Props) {

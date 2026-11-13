@@ -1,3 +1,4 @@
+import logging
 import os
 import base64
 import tempfile
@@ -13,8 +14,11 @@ import numpy as np
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
+from .attributes import KeyframePicker, dominant_color
 from .config import settings
 from .schemas import AnalysisSummary, Detection
+
+API_VERSION = "0.2.0"
 
 if TYPE_CHECKING:  # ultralytics/torch are imported lazily, on the first inference request
     from ultralytics import YOLO
@@ -29,6 +33,36 @@ model_lock = threading.Lock()
 # Which live-camera session the tracker state currently belongs to (None = needs a reset).
 live_state: dict[str, str | None] = {"session_id": None}
 LOCK_WAIT_SECONDS = 20
+
+# Start-up warm-up state: idle -> loading -> ready (or failed). Free hosts take about a minute to import
+# PyTorch and load the model; during that time requests get a quick, readable 503 instead of hanging.
+warmup: dict[str, str | None] = {"state": "idle", "error": None}
+_log = logging.getLogger("uvicorn.error")
+
+def raise_if_loading() -> None:
+    if warmup["state"] == "loading":
+        raise HTTPException(
+            status_code=503,
+            detail="The detector is starting up (it takes about a minute after the server wakes). Retrying automatically.",
+            headers={"Retry-After": "5"},
+        )
+
+def warm_up() -> None:
+    """Load the detector and run one blank frame so the first real request is fast. Safe to call twice."""
+    if warmup["state"] in ("loading", "ready"):
+        return
+    warmup["state"], warmup["error"] = "loading", None
+    try:
+        with model_lock:
+            model = get_model()
+            model.track(source=np.zeros((416, 416, 3), dtype=np.uint8), **inference_kwargs())
+            reset_trackers(model)
+            live_state["session_id"] = None
+        warmup["state"] = "ready"
+        _log.info("Detector warm-up finished.")
+    except Exception as exc:  # the lazy path in exclusive_model still works if warm-up failed
+        warmup["state"], warmup["error"] = "failed", f"{type(exc).__name__}: {exc}"[:200]
+        _log.exception("Detector warm-up failed; falling back to loading on the first request.")
 
 def get_model() -> "YOLO":
     global _model
@@ -49,6 +83,22 @@ def inference_kwargs() -> dict:
         "device": "cpu", "tracker": "bytetrack.yaml", "persist": True, "verbose": False,
     }
 
+def run_config(fps: float | None = None) -> dict:
+    """Everything needed to reproduce an analysis: model, thresholds, sampling and versions."""
+    try:
+        from importlib.metadata import version
+        ultralytics_version = version("ultralytics")
+    except Exception:  # not installed in tests
+        ultralytics_version = None
+    kw = inference_kwargs()
+    return {
+        "api_version": API_VERSION, "model": settings.model_name, "ultralytics": ultralytics_version,
+        "tracker": kw["tracker"], "device": kw["device"], "confidence_threshold": kw["conf"],
+        "iou_threshold": kw["iou"], "image_size": kw["imgsz"], "frame_stride": max(1, settings.frame_stride),
+        "max_analysis_frames": settings.max_analysis_frames,
+        "sampled_fps": round(fps / max(1, settings.frame_stride), 3) if fps else None,
+    }
+
 def reset_trackers(model) -> None:
     predictor = getattr(model, "predictor", None)
     trackers = getattr(predictor, "trackers", None) if predictor is not None else None
@@ -59,6 +109,7 @@ def reset_trackers(model) -> None:
 
 @contextmanager
 def exclusive_model(wait_seconds: float = LOCK_WAIT_SECONDS):
+    raise_if_loading()
     if not model_lock.acquire(timeout=wait_seconds):
         raise HTTPException(status_code=503, detail="The detector is busy with another request. Please retry in a moment.")
     try:
@@ -87,6 +138,7 @@ async def read_limited_upload(upload: UploadFile) -> bytes:
 
 async def analyze_upload(upload: UploadFile) -> AnalysisSummary:
     """Read the upload (async), then run the CPU-heavy analysis in a worker thread."""
+    raise_if_loading()
     try:
         content = await read_limited_upload(upload)
         filename = upload.filename or "video.mp4"
@@ -136,6 +188,7 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
         frames_by_class: dict[str, set[int]] = {}
         tracks_by_class: dict[str, set[int]] = {}
         preview_image = None
+        keyframes = KeyframePicker(duration, max(0, settings.max_keyframes))
         frame_index = sampled = processed = 0
         inference_started = time.perf_counter()
         while sampled < settings.max_analysis_frames:
@@ -149,12 +202,18 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
             sampled += 1
             result = model.track(source=frame, **inference_kwargs())[0]
             processed += 1
+            t_now = current / fps
+            frame_labels = [str(result.names.get(int(b.cls.item()), int(b.cls.item()))) for b in result.boxes] if result.boxes is not None else []
+            annotated = None
             # Save an annotated JPEG from the first processed frame for the dashboard preview.
             if preview_image is None:
                 annotated = result.plot()
                 ok_jpg, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
                 if ok_jpg:
                     preview_image = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
+            # Evidence keyframes: only frames where what is visible changes (drawn and encoded only when chosen).
+            if keyframes.wants(t_now, frame_labels):
+                keyframes.add(t_now, current, frame_labels, annotated if annotated is not None else result.plot())
             if result.boxes is None:
                 continue
             detections_before_frame = len(detections)
@@ -175,7 +234,7 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
                     frame=current, timestamp_seconds=round(current / fps, 3),
                     class_id=cls_id, label=label, confidence=round(confidence, 5),
                     x1=round(x1, 2), y1=round(y1, 2), x2=round(x2, 2), y2=round(y2, 2),
-                    track_id=track_id,
+                    track_id=track_id, color=dominant_color(frame, (x1, y1, x2, y2), label),
                 ))
                 counts[label] += 1
                 confidence_by_class.setdefault(label, []).append(confidence)
@@ -205,6 +264,7 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
             frame_width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None,
             frame_height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None,
             detections=detections, preview_image=preview_image,
+            keyframes=keyframes.items, run_config=run_config(fps),
             note=(
                 "CPU-based sampled-frame detection with ByteTrack IDs. Class diagnostics include "
                 "confidence and frame coverage; high coverage is not proof of a real-world event. "
@@ -220,6 +280,7 @@ MAX_LIVE_DIMENSION = 960
 def process_live_frame(content: bytes, session_id: str) -> dict:
     """Decode one webcam JPEG, track objects, and return detections plus an annotated preview.
     Runs in a worker thread; uses the same detector settings as uploaded-clip analysis."""
+    raise_if_loading()
     frame = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=422, detail="Could not decode the webcam frame.")
@@ -246,8 +307,9 @@ def process_live_frame(content: bytes, session_id: str) -> dict:
                     track_id = None
                 cls_id = int(box.cls.item())
                 x1, y1, x2, y2 = [round(float(v), 2) for v in box.xyxy[0].tolist()]
+                label = str(result.names.get(cls_id, cls_id))
                 detections.append({
-                    "track_id": track_id, "label": str(result.names.get(cls_id, cls_id)),
+                    "track_id": track_id, "label": label, "color": dominant_color(frame, (x1, y1, x2, y2), label),
                     "confidence": round(float(box.conf.item()), 5),
                     "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                 })

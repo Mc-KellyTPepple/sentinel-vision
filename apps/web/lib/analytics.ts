@@ -21,6 +21,8 @@ export type Det = {
   y1: number;
   x2: number;
   y2: number;
+  /** Approximate main colour of the box (a person's torso), when the API reports it. */
+  color?: string | null;
 };
 
 /** All detections of one frame. `t` is seconds (video time for clips, wall-clock seconds for live). */
@@ -40,7 +42,7 @@ export type Rule = {
   enabled: boolean;
 };
 
-export type EventKind = "enter" | "exit" | "cross" | "alert";
+export type EventKind = "enter" | "exit" | "cross" | "alert" | "behaviour";
 export type AnalyticsEvent = {
   id: string;
   t: number;
@@ -49,6 +51,8 @@ export type AnalyticsEvent = {
   severity: "info" | "warning" | "critical";
   ruleId?: string;
   trackId?: number;
+  /** Evidence: why it fired (behaviour alerts). */
+  reason?: string;
 };
 
 export type TrackPath = {
@@ -74,9 +78,16 @@ export type Snapshot = {
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
-/** Where the object touches the ground (bottom-centre of its box), normalized. Best point for zone tests. */
+/**
+ * The point used to decide whether an object is inside a zone or crossed a line, normalized.
+ * Normally the bottom-centre of its box (where it touches the ground). If the box is cut off by the bottom
+ * edge of the frame (a person at a laptop webcam, an object close to the camera), the real contact point is
+ * outside the picture, so the centre of the box is used instead.
+ */
 export function footPoint(d: Det, width: number, height: number): Pt {
-  return { x: clamp01((d.x1 + d.x2) / 2 / width), y: clamp01(d.y2 / height) };
+  const cutOff = d.y2 >= height * 0.985;
+  const y = cutOff ? (d.y1 + d.y2) / 2 : d.y2;
+  return { x: clamp01((d.x1 + d.x2) / 2 / width), y: clamp01(y / height) };
 }
 
 /** Centre of the box, normalized. Used for heatmaps and trajectories. */
@@ -285,7 +296,9 @@ export class AnalyticsEngine {
         }
       }
 
-      tr.lastFoot = foot;
+      // A foot point exactly on a counting line is not kept as the "previous" position: the step onto the line and the
+      // step off it would each only touch the line, and the crossing would be lost (13 Nov 2026).
+      if (!this.lines.some((l) => side(l.a, l.b, foot) === 0)) tr.lastFoot = foot;
       tr.last = t;
       tr.path.push({ t, x: center.x, y: center.y });
       if (tr.path.length > this.opts.maxPath) tr.path.shift();
@@ -383,6 +396,7 @@ export type SavedDetection = {
   x2: number;
   y2: number;
   track_id: number | null;
+  color?: string | null;
 };
 
 /** Saved analyses do not store the video size, so estimate it from the largest box edge. */
@@ -405,7 +419,7 @@ export function framesFromSaved(rows: SavedDetection[], size = estimateFrameSize
       f = { t: r.timestamp_seconds, width: size.width, height: size.height, detections: [] };
       byFrame.set(r.frame, f);
     }
-    f.detections.push({ track_id: r.track_id, label: r.label, confidence: r.confidence, x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 });
+    f.detections.push({ track_id: r.track_id, label: r.label, confidence: r.confidence, x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2, color: r.color ?? null });
   }
   return [...byFrame.entries()].sort((a, b) => a[0] - b[0]).map(([, f]) => f);
 }

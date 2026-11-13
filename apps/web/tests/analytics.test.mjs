@@ -30,10 +30,21 @@ test("crossedLine detects direction and ignores misses", () => {
 });
 
 test("foot and centre points are normalized and clamped", () => {
-  const d = det(1, 50, 100);
-  assert.deepEqual(footPoint(d, 100, 100), { x: 0.5, y: 1 });
-  assert.deepEqual(centerPoint(d, 100, 100), { x: 0.5, y: 0.95 });
+  const d = det(1, 50, 90); // box ends well inside the frame: bottom-centre is the contact point
+  assert.deepEqual(footPoint(d, 100, 100), { x: 0.5, y: 0.9 });
+  assert.deepEqual(centerPoint(d, 100, 100), { x: 0.5, y: 0.85 });
+  const atEdge = det(1, 50, 100); // box touches the bottom edge: contact point is out of frame, so its centre is used
+  assert.deepEqual(footPoint(atEdge, 100, 100), { x: 0.5, y: 0.95 });
   assert.equal(footPoint({ ...d, y2: 500 }, 100, 100).y, 1);
+});
+
+test("an object cut off by the bottom edge is located by its centre, so a webcam torso counts as inside a mid-frame zone", () => {
+  const torso = { track_id: 1, label: "person", confidence: 0.9, x1: 30, x2: 70, y1: 30, y2: 100 }; // box touches the bottom of a 100px frame
+  assert.deepEqual(footPoint(torso, 100, 100), { x: 0.5, y: 0.65 });
+  const e = new AnalyticsEngine([SQUARE], []);
+  assert.equal(e.update(frame(0, torso)).snapshot.zoneCounts.z1.total, 1);
+  const upright = { ...torso, y2: 90 }; // full-length object that ends inside the frame keeps the bottom-centre rule
+  assert.deepEqual(footPoint(upright, 100, 100), { x: 0.5, y: 0.9 });
 });
 
 test("zone occupancy, entry/exit events and dwell time", () => {

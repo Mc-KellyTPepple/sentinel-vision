@@ -5,12 +5,15 @@ import {
   AnalyticsEngine, HeatAccumulator, type AnalyticsEvent, type CountLine, type FrameData, type Heatmap,
   type Pt, type Rule, type Snapshot, type Zone,
 } from "./analytics";
+import {
+  BehaviourMonitor, DEFAULT_BEHAVIOUR, investigateLive, normalizeBehaviour, type BehaviourEvent, type BehaviourSettings, type Investigation,
+} from "./intelligence";
 
 export type StageMode = "view" | "zone" | "line";
-export type Setup = { zones: Zone[]; lines: CountLine[]; rules: Rule[] };
+export type Setup = { zones: Zone[]; lines: CountLine[]; rules: Rule[]; behaviour: BehaviourSettings };
 
 const STORAGE_KEY = "sentinel-vision.setup.v1";
-const EMPTY: Setup = { zones: [], lines: [], rules: [] };
+const EMPTY: Setup = { zones: [], lines: [], rules: [], behaviour: DEFAULT_BEHAVIOUR };
 export const GEOMETRY_COLORS = ["#6ce3d0", "#b6f36b", "#ffd37a", "#ff9aa8", "#8fb4ff", "#d3a4ff"];
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -25,6 +28,7 @@ function loadSetup(): Setup {
       zones: Array.isArray(p.zones) ? p.zones.filter((z) => z && Array.isArray(z.points) && z.points.every(isPt)) : [],
       lines: Array.isArray(p.lines) ? p.lines.filter((l) => l && isPt(l.a) && isPt(l.b)) : [],
       rules: Array.isArray(p.rules) ? p.rules : [],
+      behaviour: normalizeBehaviour(p.behaviour),
     };
   } catch {
     return EMPTY;
@@ -66,7 +70,14 @@ export function useVideoAnalytics() {
   const rulesRef = useRef<Rule[]>([]);
   const soundRef = useRef(false);
   const framesRef = useRef(0);
+  const monitorRef = useRef<BehaviourMonitor | null>(null);
+  const behaviourLogRef = useRef<BehaviourEvent[]>([]);
+  const zoneLogRef = useRef<AnalyticsEvent[]>([]);
+  const sessionStartRef = useRef<number | null>(null);
+  const lastTRef = useRef(0);
+  const dismissedRef = useRef<Set<string>>(new Set());
   const engine = () => (engineRef.current ||= new AnalyticsEngine());
+  const monitor = () => (monitorRef.current ||= new BehaviourMonitor(DEFAULT_BEHAVIOUR, { leaveAfter: 4 }));
   const heatAcc = () => (heatRef.current ||= new HeatAccumulator());
 
   useEffect(() => {
@@ -90,9 +101,23 @@ export function useVideoAnalytics() {
   useEffect(() => {
     soundRef.current = soundOn;
   }, [soundOn]);
+  useEffect(() => {
+    monitor().settings = setup.behaviour;
+  }, [setup.behaviour]);
 
   const ingest = useCallback((frame: FrameData) => {
-    const { events: ev, snapshot: snap } = engine().update(frame, rulesRef.current);
+    const { events: zoneEv, snapshot: snap } = engine().update(frame, rulesRef.current);
+    if (sessionStartRef.current === null) sessionStartRef.current = frame.t;
+    lastTRef.current = frame.t;
+    zoneLogRef.current = [...zoneLogRef.current, ...zoneEv].slice(-300);
+    // behaviour alerts (running, possible falls, left-behind or removed objects, crowd changes); routine
+    // appear/leave events go to the session log for questions, not to the alert feed
+    const behaviour = monitor().update(frame);
+    if (behaviour.length) behaviourLogRef.current = [...behaviourLogRef.current, ...behaviour].slice(-400);
+    const alerts: AnalyticsEvent[] = behaviour
+      .filter((b) => b.severity !== "info")
+      .map((b) => ({ id: b.id, t: b.t, kind: "behaviour", severity: b.severity, message: b.message, reason: b.reason, trackId: b.trackId }));
+    const ev = [...zoneEv, ...alerts];
     heatAcc().addFrame(frame);
     framesRef.current += 1;
     setSnapshot(snap);
@@ -100,7 +125,7 @@ export function useVideoAnalytics() {
     if (framesRef.current % 2 === 1) setHeat(heatAcc().toHeatmap());
     if (ev.length) {
       setEvents((old) => [...ev.slice().reverse(), ...old].slice(0, 80));
-      if (soundRef.current && ev.some((e) => e.kind === "alert")) beep();
+      if (soundRef.current && ev.some((e) => e.kind === "alert" || e.kind === "behaviour")) beep();
     }
   }, []);
 
@@ -109,12 +134,35 @@ export function useVideoAnalytics() {
     engine().reset();
     heatAcc().clear();
     framesRef.current = 0;
+    monitor().reset();
+    behaviourLogRef.current = [];
+    zoneLogRef.current = [];
+    sessionStartRef.current = null;
     setSnapshot(null);
     setEvents([]);
     setHeat(null);
   }, []);
 
   const clearEvents = useCallback(() => setEvents([]), []);
+  /** "Not an issue": hide one alert (false-positive management). */
+  const dismissEvent = useCallback((id: string) => {
+    dismissedRef.current.add(id);
+    setEvents((old) => old.filter((e) => e.id !== id));
+  }, []);
+  const setBehaviour = useCallback((patch: Partial<BehaviourSettings>) => {
+    setSetup((s) => ({ ...s, behaviour: normalizeBehaviour({ ...s.behaviour, ...patch }) }));
+  }, []);
+  /** What the live session has seen so far, for the AI investigator. */
+  const liveInvestigation = useCallback((): Investigation => {
+    const dismissed = dismissedRef.current;
+    return investigateLive(
+      monitor(),
+      behaviourLogRef.current.filter((e) => !dismissed.has(e.id)),
+      zoneLogRef.current.filter((e) => !dismissed.has(e.id)),
+      sessionStartRef.current,
+      lastTRef.current,
+    );
+  }, []);
 
   const addZone = useCallback((points: Pt[]) => {
     setSetup((s) => ({ ...s, zones: [...s.zones, { id: uid(), name: `Zone ${s.zones.length + 1}`, color: GEOMETRY_COLORS[s.zones.length % GEOMETRY_COLORS.length], points }] }));
@@ -131,6 +179,7 @@ export function useVideoAnalytics() {
   }, []);
   const remove = useCallback((kind: "zone" | "line", id: string) => {
     setSetup((s) => ({
+      ...s,
       zones: kind === "zone" ? s.zones.filter((z) => z.id !== id) : s.zones,
       lines: kind === "line" ? s.lines.filter((l) => l.id !== id) : s.lines,
       rules: s.rules.filter((r) => r.target !== id),
@@ -145,12 +194,13 @@ export function useVideoAnalytics() {
   const removeRule = useCallback((id: string) => {
     setSetup((s) => ({ ...s, rules: s.rules.filter((r) => r.id !== id) }));
   }, []);
-  const clearSetup = useCallback(() => setSetup(EMPTY), []);
+  const clearSetup = useCallback(() => setSetup((s) => ({ ...EMPTY, behaviour: s.behaviour })), []);
   /** A ready-made setup so the features can be tried without drawing anything first. */
   const loadExample = useCallback(() => {
     const zone: Zone = { id: uid(), name: "Center zone", color: GEOMETRY_COLORS[0], points: [{ x: 0.3, y: 0.3 }, { x: 0.7, y: 0.3 }, { x: 0.7, y: 0.95 }, { x: 0.3, y: 0.95 }] };
     const line: CountLine = { id: uid(), name: "Center line", color: GEOMETRY_COLORS[3], a: { x: 0.5, y: 0.05 }, b: { x: 0.5, y: 0.95 } };
-    setSetup({
+    setSetup((s) => ({
+      behaviour: s.behaviour,
       zones: [zone],
       lines: [line],
       rules: [
@@ -158,12 +208,12 @@ export function useVideoAnalytics() {
         { id: uid(), kind: "loiter", name: "Loitering", target: zone.id, label: "person", threshold: 10, enabled: true },
         { id: uid(), kind: "crossing", name: "Line crossing", target: line.id, label: "any", threshold: 0, enabled: true },
       ],
-    });
+    }));
   }, []);
 
   return {
     setup, ready, mode, setMode, snapshot, events, heat, frameSize, soundOn, setSoundOn,
-    ingest, resetSession, clearEvents, addZone, addLine, rename, remove, addRule, toggleRule, removeRule, clearSetup, loadExample,
+    ingest, resetSession, clearEvents, dismissEvent, setBehaviour, liveInvestigation, addZone, addLine, rename, remove, addRule, toggleRule, removeRule, clearSetup, loadExample,
   };
 }
 

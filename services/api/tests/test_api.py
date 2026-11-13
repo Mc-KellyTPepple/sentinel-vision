@@ -140,3 +140,67 @@ def test_cors_allows_configured_origin_and_rejects_others():
         "Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
     assert ok.headers.get("access-control-allow-origin") == allowed
     assert "access-control-allow-origin" not in bad.headers
+
+
+def test_ready_reports_the_detector_state(monkeypatch):
+    monkeypatch.setitem(inference.warmup, "state", "loading")
+    assert client.get("/ready").json()["detector"] == "loading"
+
+
+def test_requests_get_a_quick_503_while_the_detector_loads(monkeypatch):
+    signed_in()
+    monkeypatch.setitem(inference.warmup, "state", "loading")
+    r = upload()
+    assert r.status_code == 503 and "starting up" in r.json()["detail"] and r.headers["retry-after"] == "5"
+    frame = {"file": ("f.jpg", b"x", "image/jpeg")}
+    assert client.post("/api/v1/live/frame", files=frame, data={"session_id": "abc"}).status_code == 503
+
+
+def test_warm_up_runs_one_blank_frame_and_resets_the_trackers(monkeypatch):
+    calls, resets = [], []
+
+    class Tracker:
+        def reset(self): resets.append(1)
+
+    class Model:
+        predictor = type("P", (), {"trackers": [Tracker()]})()
+        def track(self, source, **kwargs): calls.append(source.shape); return [object()]
+
+    monkeypatch.setattr(inference, "get_model", lambda: Model())
+    monkeypatch.setitem(inference.warmup, "state", "idle")
+    inference.warm_up()
+    assert inference.warmup["state"] == "ready" and calls == [(416, 416, 3)] and resets == [1]
+    inference.warm_up()  # second call does nothing
+    assert len(calls) == 1
+    assert not inference.model_lock.locked()
+
+
+def test_a_failed_warm_up_is_recorded_and_does_not_block_requests(monkeypatch):
+    def boom():
+        raise RuntimeError("model file missing")
+
+    monkeypatch.setattr(inference, "get_model", boom)
+    monkeypatch.setitem(inference.warmup, "state", "idle")
+    inference.warm_up()
+    assert inference.warmup["state"] == "failed" and "model file missing" in inference.warmup["error"]
+    inference.raise_if_loading()  # must not raise: the first request loads the model instead
+    assert not inference.model_lock.locked()
+
+
+def test_ready_reports_optional_features(monkeypatch):
+    monkeypatch.setattr(settings, "groq_api_key", "")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    body = client.get("/ready").json()
+    assert body["ai_assistant"] is False and body["run_config"]["model"] == settings.model_name
+
+
+def test_ask_requires_sign_in_and_a_question(monkeypatch):
+    fake_supabase(monkeypatch, FakeResponse(status=401))
+    assert client.post("/api/v1/ask", json={"question": "hi", "context": "x"}).status_code == 401
+    signed_in()
+    assert client.post("/api/v1/ask", json={"question": " ", "context": "x"}).status_code == 400
+    assert client.post("/api/v1/ask", json={"question": "hi", "context": ""}).status_code == 422
+    monkeypatch.setattr(settings, "groq_api_key", "")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    r = client.post("/api/v1/ask", json={"question": "hi", "context": "x"})
+    assert r.status_code == 503 and "built-in analyst" in r.json()["detail"]
