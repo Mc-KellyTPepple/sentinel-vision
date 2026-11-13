@@ -3,7 +3,7 @@
 ## Automated checks
 | What | Command | Where |
 |---|---|---|
-| Analytics engine (zones, lines, rules, heatmaps) | `npm test` | `apps/web` (Node 22+) |
+| Analytics engine, behaviour alerts, AI investigator, acceptance scenarios (`tests/acceptance.test.mjs`) | `npm test` | `apps/web` (Node 22+) |
 | Types and style | `npx tsc --noEmit` and `npm run lint` | `apps/web` |
 | API (auth, uploads, limits, start-up state) | `pytest -q` | `services/api` |
 

@@ -624,9 +624,6 @@ export default function Home() {
             {!liveRunning&&(liveDetections.length>0||liveLastFrameAt)&&<p className="subcopy" style={{margin:0}}>Showing stale session results from {liveLastFrameAt||"the last camera run"}; these are not current live detections.</p>}
             {liveRunning&&liveError&&<p className="subcopy" style={{margin:0}}>Latest successful frame: {liveLastFrameAt||"none yet"}. Results may be stale until the connection recovers.</p>}
             <p className="privacy-note" style={{margin:0}}>Tracking IDs are temporary and may change if objects disappear or tracking is restarted. Browser camera permission is required. The hosted demo runs on a small shared CPU, so each frame can take a few seconds. Last frame: {liveLastFrameAt||"—"} · loop {liveRunning?`${liveFps.toFixed(1)} FPS`:"—"} · frames sent at {liveSendWidth}px (adapts to server speed) · {!liveRunning?"stopped":liveFrames===0?"waiting for first frame":liveError?"retrying":"connected"}.</p>
-          </div>
-          <div className="live-side">
-            <div className="card"><SetupPanel va={va} /></div>
             <details className="fold"><summary>Ask about this session</summary><div>
               <Investigator compact inv={liveInvestigation} api={API} getToken={getToken} ai={aiInfo} />
             </div></details>
@@ -640,11 +637,14 @@ export default function Home() {
               {!Object.keys(liveTrackCounts).length?<p className="subcopy" style={{margin:0}}>Track summaries appear after objects are detected.</p>:<div className="class-list">{Object.entries(liveTrackCounts).sort((a,b)=>Number(a[0])-Number(b[0])).map(([id,t])=><div className="class-row" key={id}><span><strong>#{id}</strong> · {t.label}<small style={{display:"block",color:"var(--muted, #98a2b3)"}}>{t.count} frame observations · {(t.confidenceTotal/t.count*100).toFixed(1)}% avg. confidence</small></span><span className="pill">{liveRunning&&!liveError?"Seen this session":"Last seen"}</span></div>)}</div>}
             </div></details>
           </div>
+          <div className="live-side">
+            <div className="card"><SetupPanel va={va} /></div>
+          </div>
         </div>
       </div>
-      <div className="analyze-grid" hidden={tab!=="analyze"}>
-      <div className="analyze-left">
-      <div className="panel">
+      <div className="analyze" hidden={tab!=="analyze"}>
+      <div className="analyze-top">
+      <div className="panel analyze-upload">
         <div className="panel-heading"><div><span className="step">01</span><h2>Analyze footage</h2></div><span className="pill">CPU inference</span></div>
         <p className="subcopy">Upload a short MP4, MOV, AVI, MKV, or WebM clip. Limits: {MAX_UPLOAD_MB} MB and {MAX_VIDEO_SECONDS} seconds.</p>
         <form onSubmit={analyze}>
@@ -658,9 +658,10 @@ export default function Home() {
         {(liveRunning||liveStarting)&&<p className="subcopy">Stop the live camera to run an analysis: uploads and live tracking share one detector.</p>}
         {error&&<div className="error">{error}</div>}
         <div className="privacy-note"><span>◈</span> Video clips are processed temporarily. Saved analyses retain metadata and detection coordinates, not the original video file or annotated preview.</div>
+        {saveNotice && <p className="save-notice">{saveNotice}</p>}
       </div>
-      {saveNotice && <p className="save-notice">{saveNotice}</p>}
-      {(jobs.length > 0 || jobResults) && <div className="panel"><div className="saved-jobs">
+      <div className="panel analyze-saved"><div className="saved-jobs">
+        {!jobs.length&&!jobResults ? <><h3>Saved analyses</h3><div className="saved-empty"><Icon name="clock" size={18}/><strong>No saved analyses yet</strong><span>Every clip you analyse is saved here with its detections, so you can reopen the report, search it by content (for example “bag left behind”) and delete old ones.</span></div></> : <>
         <h3>{jobResults ? `Search results (${jobResults.length})` : "Recent saved analyses"}</h3>
         <form className="job-search" onSubmit={e=>void searchJobs(e)}>
           <input value={jobQuery} onChange={e=>{setJobQuery(e.target.value); if(!e.target.value.trim()) setJobResults(null);}} placeholder="Search by content, e.g. “person in red”, “bag left behind”" aria-label="Search saved analyses" />
@@ -668,11 +669,12 @@ export default function Home() {
           {jobResults&&<button className="small-button" type="button" onClick={()=>{setJobQuery("");setJobResults(null);}}>Clear</button>}
         </form>
         {jobResults&&!jobResults.length&&<p className="subcopy" style={{margin:"4px 0"}}>No saved analysis matches. {schemaV8?"Analyses saved before this update can only be found by file name.":"Run database migration 008 to search by content; until then only file names are searched."}</p>}
-        {(jobResults??jobs).map(job=><div className="saved-job" key={job.id}><span><strong>{job.original_filename}</strong><small>{new Date(job.created_at).toLocaleString()}</small>{job.summary&&<small title={job.summary}>{job.summary.length>120?job.summary.slice(0,118)+"…":job.summary}</small>}</span><span>{job.detections_count} detections · {job.status}</span><span style={{display:"flex",gap:6}}><button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id ? "Loading…" : selectedJobId===job.id ? "Viewing" : "Open report"}</button><button className={`small-button${confirmDeleteId===job.id?" danger":""}`} type="button" onClick={()=>void deleteJob(job.id)} onBlur={()=>setConfirmDeleteId(c=>c===job.id?null:c)} title="Delete this analysis, its detections and incidents">{confirmDeleteId===job.id?"Confirm delete":<Icon name="trash" size={14}/>}</button></span></div>)}
+        <div className="saved-list">{(jobResults??jobs).map(job=><div className="saved-job" key={job.id}><span><strong>{job.original_filename}</strong><small>{new Date(job.created_at).toLocaleString()}</small>{job.summary&&<small title={job.summary}>{job.summary.length>120?job.summary.slice(0,118)+"…":job.summary}</small>}</span><span>{job.detections_count} detections · {job.status}</span><span style={{display:"flex",gap:6}}><button className="small-button" type="button" disabled={loadingSavedJob} onClick={()=>void loadSavedAnalysis(job)}>{loadingSavedJobId===job.id ? "Loading…" : selectedJobId===job.id ? "Viewing" : "Open report"}</button><button className={`small-button${confirmDeleteId===job.id?" danger":""}`} type="button" onClick={()=>void deleteJob(job.id)} onBlur={()=>setConfirmDeleteId(c=>c===job.id?null:c)} title="Delete this analysis, its detections and incidents">{confirmDeleteId===job.id?"Confirm delete":<Icon name="trash" size={14}/>}</button></span></div>)}</div>
         <div className="retention"><Icon name="clock" size={14}/> Data retention: delete analyses older than <input type="number" min={1} max={3650} value={retentionDays} onChange={e=>{setRetentionDays(Number(e.target.value));setConfirmRetention(false);}} aria-label="Days to keep analyses"/> days <button type="button" className={`small-button${confirmRetention?" danger":""}`} onClick={()=>void applyRetention()} onBlur={()=>setConfirmRetention(false)}>{confirmRetention?"Confirm: delete permanently":"Apply now"}</button></div>
-      </div></div>}
+        </>}
+      </div></div>
       </div>
-      <div className="panel">
+      <div className="panel analyze-report">
         <div className="panel-heading"><div><span className="step">02</span><h2>Analysis report</h2></div><span className="pill">{busy?"Processing":result?(selectedJobId?"Saved report":"Complete"):"Awaiting video"}</span></div>
         {!result&&!busy&&!loadingSavedJob&&<div className="empty-state"><div className="empty-icon">⌁</div><strong>{jobs.length ? "Choose a saved analysis or upload a video" : "Your results will appear here"}</strong><p>{jobs.length ? "Your most recent saved analysis is restored automatically when available. Choose any saved report above, or run a new analysis." : "No saved analyses yet. Upload a video and run an analysis to see detected objects and performance metrics."}</p></div>}
         {loadingSavedJob&&<div className="empty-state"><span className="spinner large"/><strong>Loading saved report</strong><p>Restoring saved detections and metadata from Supabase.</p></div>}
@@ -685,12 +687,15 @@ export default function Home() {
             <div className="metric"><span>Processing time</span><strong>{result.processing_seconds == null ? "N/A" : `${result.processing_seconds}s`}</strong></div>
           </div>
           <div className="result-meta"><span>{result.filename}</span><span>{result.duration_seconds}s video</span></div>
-          {clipInvestigation&&<Investigator key={`${selectedJobId||"new"}-${result.filename}-${result.detections_count}`} inv={clipInvestigation.inv} keyframes={result.keyframes||[]} frames={clipInvestigation.frames} api={API} getToken={getToken} ai={aiInfo} />}
+          {/* Two balanced columns: what happened (visuals, tracks, activity) beside the AI Investigator (13 Nov 2026) */}
+          <div className={`report-cols${clipInvestigation?"":" single"}`}><div className="report-col">
           {result.preview_image&&<div className="preview-block"><h3>Detection preview</h3><p className="subcopy">Bounding boxes and labels from the first analyzed frame.</p><img className="detection-preview" src={result.preview_image} alt="First analyzed video frame with AI detection boxes" /></div>}
           <AnalysisVisuals detections={result.detections} va={va} frameSize={result.frame_width&&result.frame_height?{width:result.frame_width,height:result.frame_height}:null} />
+          {!clipInvestigation&&<>
           <h3>Detected classes</h3>
           {!Object.keys(result.class_counts).length?<p className="subcopy">No objects above the confidence threshold were detected.</p>:
             <div className="class-list">{Object.entries(result.class_counts).sort((a,b)=>b[1]-a[1]).map(([label,count])=><div className="class-row" key={label}><span>{label}</span><strong>{count}</strong></div>)}</div>}
+          </>}
           <div className="tracking-summary" style={{margin:"18px 0",padding:16,border:"1px solid var(--border, #293244)",borderRadius:14,background:"rgba(127,140,160,0.045)"}}>
             <h3 style={{marginTop:0,marginBottom:6}}>Object tracking</h3>
             <p className="subcopy" style={{margin:0}}>{trackSummaries.length} unique track IDs detected · {result.detections.filter(d=>d.track_id!==null).length} detections linked to a track. IDs are estimated within this clip and may split when objects are occluded or missed.</p>
@@ -721,7 +726,15 @@ export default function Home() {
             </div>
             <div style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:8,fontSize:12,color:"var(--muted, #98a2b3)"}}><span>0.00s</span><span>{(result.duration_seconds/2).toFixed(2)}s</span><span>{result.duration_seconds.toFixed(2)}s</span></div>
           </div>
-          <div style={{display:"flex",alignItems:"end",justifyContent:"space-between",gap:12,flexWrap:"wrap",marginTop:18}}><div><h3 style={{marginBottom:4}}>Detection samples</h3><p className="subcopy" style={{margin:0}}>Filter by object class or select a timeline interval. Bounding boxes and confidence values come from saved detector output.</p></div><label style={{minWidth:190}}>Object class<select value={detectionClassFilter} onChange={e=>{setDetectionClassFilter(e.target.value);setSelectedTimelineBucket(null);}} style={{display:"block",width:"100%",marginTop:6,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border, #293244)",background:"var(--panel, #101827)",color:"inherit"}}><option value="all">All classes</option>{Object.keys(result.class_counts).sort().map(label=><option key={label} value={label}>{label}</option>)}</select></label></div>
+          </div>
+          {clipInvestigation&&<div className="report-col">
+            <Investigator key={`${selectedJobId||"new"}-${result.filename}-${result.detections_count}`} inv={clipInvestigation.inv} keyframes={result.keyframes||[]} frames={clipInvestigation.frames} api={API} getToken={getToken} ai={aiInfo} />
+            <h3>Detected classes</h3>
+            {!Object.keys(result.class_counts).length?<p className="subcopy">No objects above the confidence threshold were detected.</p>:
+              <div className="class-list">{Object.entries(result.class_counts).sort((a,b)=>b[1]-a[1]).map(([label,count])=><div className="class-row" key={label}><span>{label}</span><strong>{count}</strong></div>)}</div>}
+          </div>}
+          </div>
+          <div style={{display:"flex",alignItems:"end",justifyContent:"space-between",gap:12,flexWrap:"wrap",marginTop:18}}><div><h3 style={{marginBottom:4}}>Detection samples</h3><p className="subcopy" style={{margin:0}}>Filter by object class or select a timeline interval. Bounding boxes and confidence values come from saved detector output.</p></div><label className="field-label" style={{minWidth:190}}>Object class<select value={detectionClassFilter} onChange={e=>{setDetectionClassFilter(e.target.value);setSelectedTimelineBucket(null);}} style={{display:"block",width:"100%",marginTop:6,padding:"10px 12px",borderRadius:10,border:"1px solid var(--border, #293244)",background:"var(--panel, #101827)",color:"inherit"}}><option value="all">All classes</option>{Object.keys(result.class_counts).sort().map(label=><option key={label} value={label}>{label}</option>)}</select></label></div>
           {(detectionClassFilter!=="all"||selectedTimelineBucket!==null||selectedTrackId!==null)&&<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",margin:"12px 0"}}><span className="pill">{detectionClassFilter==="all"?"All classes":detectionClassFilter}{selectedTimelineBucket!==null?` · ${timelineBuckets[selectedTimelineBucket].start.toFixed(2)}–${timelineBuckets[selectedTimelineBucket].end.toFixed(2)}s`:""}{selectedTrackId!==null?` · Track #${selectedTrackId}`:""}</span><button type="button" className="small-button" onClick={()=>{setDetectionClassFilter("all");setSelectedTimelineBucket(null);setSelectedTrackId(null);}}>Clear filters</button></div>}
           <p className="subcopy">Showing {Math.min(filteredDetections.length,12)} of {filteredDetections.length} matching detections.</p>
           <div className="table-wrap"><table><thead><tr><th>Time</th><th>Frame</th><th>Track ID</th><th>Object</th><th>Bounding box (x1, y1 → x2, y2)</th><th>Confidence</th></tr></thead><tbody>

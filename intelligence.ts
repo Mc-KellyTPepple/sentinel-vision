@@ -222,7 +222,12 @@ export class BehaviourMonitor {
         const dist = Math.hypot(o.cx - ref.cx, o.cy - ref.cy);
         const scale = label === "person" ? Math.max(1, (o.h + ref.h) / 2) : diag;
         const sizeJump = Math.abs(o.h - ref.h) / Math.max(1, ref.h);
-        if (!(label === "person" && (dist / scale > 3 * (t - ref.t) + 1.5 || sizeJump > 0.6))) {
+        // One step carrying most of the distance is a tracker ID switch, not running (needs 4+ steps to tell; 13 Nov 2026).
+        const win = tr.recent.filter((p) => p.t >= ref.t);
+        let maxStep = 0;
+        for (let i = 1; i < win.length; i++) maxStep = Math.max(maxStep, Math.hypot(win[i].cx - win[i - 1].cx, win[i].cy - win[i - 1].cy));
+        const oneStepJump = label === "person" && win.length >= 5 && dist / scale > 0.8 && maxStep > 0.6 * dist;
+        if (!oneStepJump && !(label === "person" && (dist / scale > 3 * (t - ref.t) + 1.5 || sizeJump > 0.6))) {
           speed = dist / scale / (t - ref.t);
           tr.speeds.push(speed);
           if (tr.speeds.length > 600) tr.speeds = tr.speeds.filter((_, i) => i % 2 === 0);

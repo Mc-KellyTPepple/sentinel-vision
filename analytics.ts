@@ -296,7 +296,9 @@ export class AnalyticsEngine {
         }
       }
 
-      tr.lastFoot = foot;
+      // A foot point exactly on a counting line is not kept as the "previous" position: the step onto the line and the
+      // step off it would each only touch the line, and the crossing would be lost (13 Nov 2026).
+      if (!this.lines.some((l) => side(l.a, l.b, foot) === 0)) tr.lastFoot = foot;
       tr.last = t;
       tr.path.push({ t, x: center.x, y: center.y });
       if (tr.path.length > this.opts.maxPath) tr.path.shift();

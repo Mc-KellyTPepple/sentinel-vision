@@ -111,6 +111,7 @@ export default function SetupPanel({ va }: { va: VideoAnalytics }) {
           {(Object.keys(KIND_LABEL) as RuleKind[]).map((k) => <option key={k} value={k}>{KIND_LABEL[k]}</option>)}
         </select>
         <select value={chosen} onChange={(e) => setTarget(e.target.value)} aria-label={kind === "crossing" ? "Line" : "Zone"} disabled={!targets.length}>
+          {!targets.length && <option value="">{kind === "crossing" ? "Draw a line first" : "Draw a zone first"}</option>}
           {targets.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
         </select>
         <input list="class-options" value={label} onChange={(e) => setLabel(e.target.value)} aria-label="Object class" placeholder="any" />

@@ -25,18 +25,15 @@ git push -u origin main
 - Commit `services/api/yolo11n.pt` (about 5.6 MB) so the API does not download weights at request time.
 
 ## 1. Supabase
-1. SQL editor: run `supabase/migrations/001` to `008`, in order. (Already deployed? Run only `008`; it is additive.)
+1. SQL editor: run `supabase/migrations/001` to `007`, in order.
 2. Project settings > API: copy the project URL and the **publishable (anon)** key. Never put a secret/service-role key in either app.
 3. Authentication > URL configuration: set **Site URL** to your Vercel URL and add it (and `http://localhost:3000`) to **Redirect URLs**. Do this after step 3 below.
 
 ## 2. Render (API)
 1. New > Blueprint > pick the repo (it reads `render.yaml`), or create a Web Service with root directory `services/api`.
 2. Set the `sync: false` variables: `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `ALLOWED_ORIGINS` (temporarily `http://localhost:3000`).
-3. Optional, for the AI analyst: create a free key at console.groq.com and set `GROQ_API_KEY`. Only the event text of
-   an analysis is sent to Groq, never video. Without the key, questions are answered by the built-in analyst.
-4. Deploy, then open `https://<service>.onrender.com/health`: expect `{"status":"ok", ...}`. `/ready` shows
-   `"ai_assistant": true` when the key is set.
-5. First analysis request loads PyTorch and the model. Watch the logs. If the service restarts with an
+3. Deploy, then open `https://<service>.onrender.com/health`: expect `{"status":"ok", ...}`.
+4. First analysis request loads PyTorch and the model. Watch the logs. If the service restarts with an
    out-of-memory message (the free instance has 512 MB of RAM), see "If the free tier is not enough".
 
 ### Creating the Render service without the Blueprint
@@ -62,10 +59,8 @@ environment variables listed in `render.yaml`.
 3. Sign up (confirm the email if confirmation is enabled), sign in.
 4. Upload a 5-10 second clip: results appear and are saved; reload and confirm the saved job is restored.
 5. Start live tracking (camera needs HTTPS; Vercel provides it).
-6. In the report, the Sentinel AI Investigator shows a summary and timeline; ask "What happened in this video?" and
-   click a time to see its evidence frame.
-7. Acknowledge an incident, mark another as a false alarm, and open its audit history.
-8. Browser console: no CORS errors.
+6. Acknowledge an incident and open its audit history.
+7. Browser console: no CORS errors.
 
 ## If the free tier is not enough
 Symptoms: out-of-memory restarts, analysis taking minutes, request timeouts. Options, in order of effort:
@@ -73,20 +68,6 @@ Symptoms: out-of-memory restarts, analysis taking minutes, request timeouts. Opt
 2. Move the API to a host with more memory. A Docker-based Hugging Face Space on the free CPU tier is a common
    choice for demos like this (check its current limits); Render's paid plans also work. Only `NEXT_PUBLIC_API_BASE_URL` and `ALLOWED_ORIGINS` change.
 3. Export the detector to ONNX and use onnxruntime to cut memory; this requires replacing the Ultralytics tracker usage.
-
-## Cold starts
-A sleeping free instance wakes on the first request. The API then loads the detector in the background (`PRELOAD_MODEL`, on by
-default); until it is ready, live frames and uploads get a quick 503 saying the detector is starting up, and the page explains
-the wait and retries by itself. `GET /ready` shows the state (`detector`: loading, ready, failed).
-
-## What the new features cost on the free tier
-- Colours and evidence keyframes are computed on the API with OpenCV: a few milliseconds per frame and at most 8 small
-  JPEGs (about 15-35 KB each) per clip. `MAX_KEYFRAMES=0` turns keyframes off.
-- Behaviour alerts, the timeline, the summary and the built-in analyst run in the browser on the returned detections:
-  no extra API load.
-- `/api/v1/ask` sends a few KB of text to the LLM provider and waits for its answer; it uses no CPU or model memory on
-  Render. It is rate-limited per user (`ASK_PER_MINUTE`).
-- Live frames adapt: when round trips are slow the browser sends smaller frames and waits longer between them.
 
 ## Performance on the free tier
 `OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1` (set in `render.yaml`) stop PyTorch from oversubscribing the small CPU slice.
