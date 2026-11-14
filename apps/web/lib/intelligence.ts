@@ -108,6 +108,12 @@ function regionName(x: number): string {
   return x < 1 / 3 ? "the left side" : x > 2 / 3 ? "the right side" : "the centre";
 }
 
+/** "on the left side" / "in the centre" / "on the right side". */
+function whereIs(x: number): string {
+  const region = regionName(x);
+  return (region === "the centre" ? "in " : "on ") + region;
+}
+
 /** "Person #3 (red top)" / "Backpack #7 (black)". */
 export function nameTrack(label: string, id: number, color?: string | null): string {
   const c = color ? ` (${color}${label === "person" ? " top" : ""})` : "";
@@ -210,7 +216,7 @@ export class BehaviourMonitor {
         const first = tr.head[0];
         events.push({
           id: nextId("appear"), t: tr.first, kind: "appear", severity: "info", trackId: tr.id, label,
-          message: `${nameTrack(label, tr.id, color)} appeared on ${regionName(first.cx / W)}.`,
+          message: `${nameTrack(label, tr.id, color)} appeared ${whereIs(first.cx / W)}.`,
           reason: `First detected at ${mmss(tr.first)} and tracked in ${tr.n} frames.`,
         });
       }
@@ -308,7 +314,7 @@ export class BehaviourMonitor {
         const lastO = tr.recent[tr.recent.length - 1];
         events.push({
           id: nextId("leave"), t: tr.last, kind: "leave", severity: "info", trackId: tr.id, label,
-          message: `${nameTrack(label, tr.id, color)} was last seen on ${regionName(lastO.cx / tr.frameW)} after ${(tr.last - tr.first).toFixed(1)}s in view.`,
+          message: `${nameTrack(label, tr.id, color)} was last seen ${whereIs(lastO.cx / tr.frameW)} after ${(tr.last - tr.first).toFixed(1)}s in view.`,
           reason: `Not detected since ${mmss(tr.last)}.`,
         });
       }
@@ -347,7 +353,7 @@ export class BehaviourMonitor {
         events.push({
           id: nextId("crowd"), t, kind: "crowd_change", severity: "warning",
           message: change > 0 ? `The number of people rose quickly to ${count}.` : `The number of people dropped quickly to ${count}.`,
-          reason: `About ${Math.round(base)} people were visible over the previous few seconds; now ${count}.`,
+          reason: `About ${Math.round(base)} ${Math.round(base) === 1 ? "person was" : "people were"} visible over the previous few seconds; now ${count}.`,
         });
       }
       this.crowdBase = base + (count - base) * Math.min(1, this.avgDt / 4);

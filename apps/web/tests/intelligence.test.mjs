@@ -180,3 +180,15 @@ test("report, names, time format and settings validation", () => {
   assert.equal(guessScene({ car: 2, person: 1 }).name, "a street, road or parking area");
   assert.equal(guessScene({}), null);
 });
+
+test("event wording: 'in the centre' and '1 person was' (14 Nov 2026)", () => {
+  const frames = [
+    ...seq(4, (t) => frame(t, person(1, 320))),
+    ...seq(2, (t) => frame(4 + t, person(1, 320), person(2, 100), person(3, 200), person(4, 450), person(5, 550))),
+  ];
+  const { events } = run(frames);
+  const appear = events.find((e) => e.kind === "appear" && e.trackId === 1);
+  const crowd = events.find((e) => e.kind === "crowd_change");
+  assert.match(appear.message, /appeared in the centre\./);
+  assert.match(crowd.reason, /About 1 person was visible/);
+});
