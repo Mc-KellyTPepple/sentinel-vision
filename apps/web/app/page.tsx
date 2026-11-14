@@ -182,8 +182,10 @@ export default function Home() {
         if (roundTrip > 2500) { liveSlowRef.current += 1; liveFastRef.current = 0; } else if (roundTrip < 1000) { liveFastRef.current += 1; liveSlowRef.current = 0; }
         if (liveSlowRef.current >= 3 && liveWidthRef.current > 320) { liveWidthRef.current -= 160; liveSlowRef.current = 0; setLiveSendWidth(liveWidthRef.current); setLiveEvents(old=>[{id:`adapt-${Date.now()}`,time:new Date().toLocaleTimeString(),message:`The server is slow; sending smaller frames (${liveWidthRef.current}px wide) to keep up.`,kind:"system" as const},...old].slice(0,20)); }
         if (liveFastRef.current >= 6 && liveWidthRef.current < 640) { liveWidthRef.current += 160; liveFastRef.current = 0; setLiveSendWidth(liveWidthRef.current); }
-        // give a busy shared CPU room to breathe instead of queueing frames behind each other
-        pause = (data.processed_ms||0) > 1500 ? 900 : 450;
+        // give a busy shared CPU room to breathe instead of queueing frames behind each other; when the detector is
+        // quick (ONNX Runtime: ~0.2 s a frame on the free host) send the next frame almost at once
+        const processed = data.processed_ms||0;
+        pause = processed > 1500 ? 900 : processed > 500 ? 450 : 120;
         setLiveFrame(data.annotated_image || ""); ingest({t:Date.now()/1000,width:data.frame_width||640,height:data.frame_height||480,detections:data.detections||[]}); setLiveDetections(data.detections || []); setLiveFrames(count=>count+1); setLiveProcessedMs(data.processed_ms || 0); setLiveLastFrameAt(new Date().toLocaleTimeString());
         const now=performance.now(); setLiveFps(1000/Math.max(1,now-previous)); previous=now;
         liveConsecutiveErrorsRef.current = 0;
@@ -634,7 +636,7 @@ export default function Home() {
             {liveError&&!(liveFrames===0&&/starting up/i.test(liveError))&&<div className="error">{liveError}</div>}
             {!liveRunning&&(liveDetections.length>0||liveLastFrameAt)&&<p className="subcopy" style={{margin:0}}>Showing stale session results from {liveLastFrameAt||"the last camera run"}; these are not current live detections.</p>}
             {liveRunning&&liveError&&<p className="subcopy" style={{margin:0}}>Latest successful frame: {liveLastFrameAt||"none yet"}. Results may be stale until the connection recovers.</p>}
-            <p className="privacy-note" style={{margin:0}}>Tracking IDs are temporary and may change if objects disappear or tracking is restarted. Browser camera permission is required. The hosted demo runs on a small shared CPU, so each frame can take a few seconds. Last frame: {liveLastFrameAt||"—"} · loop {liveRunning?`${liveFps.toFixed(1)} FPS`:"—"} · frames sent at {liveSendWidth}px (adapts to server speed) · {!liveRunning?"stopped":liveFrames===0?"waiting for first frame":liveError?"retrying":"connected"}.</p>
+            <p className="privacy-note" style={{margin:0}}>Tracking IDs are temporary and may change if objects disappear or tracking is restarted. Browser camera permission is required. The hosted demo runs on a small shared CPU, so expect a few frames per second. Last frame: {liveLastFrameAt||"—"} · loop {liveRunning?`${liveFps.toFixed(1)} FPS`:"—"} · frames sent at {liveSendWidth}px (adapts to server speed) · {!liveRunning?"stopped":liveFrames===0?"waiting for first frame":liveError?"retrying":"connected"}.</p>
             <details className="fold"><summary>Ask about this session</summary><div>
               <Investigator compact inv={liveInvestigation} api={API} getToken={getToken} ai={aiInfo} />
             </div></details>
