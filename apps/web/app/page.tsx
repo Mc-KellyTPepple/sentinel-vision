@@ -481,10 +481,21 @@ export default function Home() {
       const {data:sessionData,error:sessionError} = await supabase.auth.getSession();
       if (sessionError || !sessionData.session?.access_token) throw new Error("Your session has expired. Please sign in again.");
       const body = new FormData(); body.append("file",file);
-      const response = await fetch(`${API}/api/v1/analyze`,{
-        method:"POST",body,
-        headers:{Authorization:`Bearer ${sessionData.session.access_token}`}
-      });
+      // Never spin forever: the API stops itself after 90 s of inference, so 3 minutes covers upload, a cold start
+      // and the response (14 Nov 2026: an analysis on the free server appeared to load indefinitely).
+      const controller = new AbortController();
+      const timer = setTimeout(()=>controller.abort(), 180_000);
+      let response: Response;
+      try {
+        response = await fetch(`${API}/api/v1/analyze`,{
+          method:"POST",body,signal:controller.signal,
+          headers:{Authorization:`Bearer ${sessionData.session.access_token}`}
+        });
+      } catch(e) {
+        if (controller.signal.aborted) throw new Error("The analysis took more than 3 minutes, so it was stopped. The free API server may be overloaded or still busy with an earlier clip: wait a minute and try again, or try a shorter clip.");
+        throw e;
+      } finally { clearTimeout(timer); }
+      if (response.status===429) throw new Error("The detector is still busy with another clip (it can take a minute or two on the free server). Please try again shortly.");
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Analysis failed");
       const analysis = data as Analysis;
