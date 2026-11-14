@@ -66,7 +66,7 @@ export function Sparkline({ values, color = "#b6f36b", height = 34 }: { values: 
   );
 }
 
-export function BarChart({ items, height = 150, color = "#6ce3d0" }: { items: { label: string; value: number }[]; height?: number; color?: string }) {
+export function BarChart({ items, height = 150, color = "#6ce3d0" }: { items: { label: string; value: number; title?: string }[]; height?: number; color?: string }) {
   if (!items.length) return <p className="subcopy">No data yet.</p>;
   const W = 420;
   const pad = 22;
@@ -88,6 +88,7 @@ export function BarChart({ items, height = 150, color = "#6ce3d0" }: { items: { 
         const x = pad + i * bw + bw * 0.18;
         return (
           <g key={`${it.label}-${i}`}>
+            {it.title && <title>{it.title}</title>}
             <rect x={x} y={height - 22 - h} width={bw * 0.64} height={Math.max(2, h)} rx={4} fill="url(#bar-grad)" />
             <text x={x + bw * 0.32} y={height - 26 - h} textAnchor="middle" className="chart-val">{it.value}</text>
             <text x={x + bw * 0.32} y={height - 7} textAnchor="middle" className="chart-lab">{it.label}</text>

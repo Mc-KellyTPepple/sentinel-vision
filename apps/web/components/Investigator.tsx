@@ -173,7 +173,7 @@ export default function Investigator({
             ))}
           </ul>
         )}
-        {!ai.available && !compact && <p className="footnote" style={{ marginTop: 8 }}>Answers come from the built-in analyst, which handles common questions. Add a free Groq key to the API (GROQ_API_KEY) for free-form questions; only the event text below is sent, never the video.</p>}
+        {!ai.available && !compact && <p className="footnote" style={{ marginTop: 8 }}>Answers come from the built-in analyst, which handles common questions about what appeared, when and where. Answers are based on the event timeline below, not on the video itself.</p>}
       </div>
 
       <div className="inv-section">

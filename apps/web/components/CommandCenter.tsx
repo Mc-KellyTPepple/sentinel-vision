@@ -51,6 +51,14 @@ export default function CommandCenter({ jobs, incidents, apiStatus, apiLatencyMs
   const withFps = done.filter((j) => j.average_inference_fps != null);
   const avgFps = withFps.length ? withFps.reduce((a, j) => a + (j.average_inference_fps || 0), 0) / withFps.length : null;
   const analyzedSeconds = done.reduce((a, j) => a + (j.duration_seconds || 0), 0);
+  // Bar labels: the date when analyses span several days, otherwise the time (five bars all reading "11/14" told you nothing).
+  const dayOf = (j: Job) => new Date(j.created_at).toDateString();
+  const sameDay = recent.length > 1 && recent.every((j) => dayOf(j) === dayOf(recent[0]));
+  const barLabel = (j: Job) => sameDay
+    ? new Date(j.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false })
+    : new Date(j.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const shapes = setup.zones + setup.lines;
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
   return (
     <div className="overview">
@@ -78,13 +86,14 @@ export default function CommandCenter({ jobs, incidents, apiStatus, apiLatencyMs
           <Sparkline values={processing} color="#8fb4ff" />
         </Kpi>
         <Kpi label="Live session" value={live.running ? "Live" : "Idle"} hint={live.running ? `${live.frames} frames · ${live.objects} objects · ${live.tracks} tracks` : "camera not running"} icon="activity" tone={live.running ? "green" : "cyan"} />
-        <Kpi label="Setup" value={`${setup.zones + setup.lines} shapes`} hint={`${setup.rules} rules · ${setup.alerts} recent events`} icon="polygon" tone="amber" />
+        <Kpi label="Setup" value={plural(shapes, "shape")} hint={`${plural(setup.rules, "rule")} · ${plural(setup.alerts, "recent event")}`} icon="polygon" tone="amber" />
       </section>
 
       <section className="ov-grid">
         <div className="panel ov-card">
           <div className="panel-heading"><div><h2>Detections per analysis</h2></div><span className="pill">last {recent.length}</span></div>
-          <BarChart items={recent.map((j) => ({ label: new Date(j.created_at).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }), value: j.detections_count }))} />
+          <BarChart items={recent.map((j) => ({ label: barLabel(j), value: j.detections_count, title: `${j.original_filename}: ${j.detections_count} detections` }))} />
+          <button type="button" className="small-button" onClick={() => onGoto("analyze")}>Open analysis studio</button>
         </div>
         <div className="panel ov-card">
           <div className="panel-heading"><div><h2>Incidents</h2></div><span className="pill">{incidents.length} total</span></div>

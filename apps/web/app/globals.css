@@ -377,3 +377,41 @@ select:focus,input:focus,button:focus-visible,summary:focus-visible{outline:2px 
 /* small labels above filters (13 Nov 2026) */
 .field-label{display:block;color:var(--muted);font-size:12px}
 .ov-actions .small-button{margin-left:0}
+
+/* ---------------------------------------------------------------------------
+   Display polish (14 Nov 2026): layout fixes from a full desktop and phone review
+   --------------------------------------------------------------------------- */
+/* tab bar: no bright native scrollbar on phones; the selected tab is scrolled into view instead */
+.tabs{scrollbar-width:none;-ms-overflow-style:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:none}
+
+/* camera stopped: a compact status card at the bottom of the stage, above the zone overlay, so the
+   message and the zone outlines never draw on top of each other */
+.stage-empty{inset:auto 12px 12px 12px;display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:3px;padding:11px 14px;border-radius:12px;background:rgba(8,13,22,.88);border:1px solid #ffffff1c;backdrop-filter:blur(6px);z-index:2;pointer-events:none;font-size:12px;line-height:1.5}
+.stage-empty strong{font-size:14px}
+
+/* live diagnostics: labelled stats instead of one run-on sentence */
+.live-diag{display:flex;flex-wrap:wrap;gap:6px 18px;margin:0;color:var(--muted);font:11px 'DM Mono',monospace}
+.live-diag b{color:#6f7d8b;font-weight:500;text-transform:uppercase;letter-spacing:.6px;margin-right:4px}
+
+/* overview cards: the action button sits at the bottom so side-by-side cards line up */
+.ov-card>.small-button{margin:auto 0 0;align-self:flex-start}
+
+/* analysis report: a sub-heading that ranks below its section heading */
+.results .sub-heading{margin:18px 0 6px;font:600 11px 'DM Mono',monospace;color:var(--muted);text-transform:uppercase;letter-spacing:.8px}
+
+/* incidents: cards share the full row, so a single incident is not a narrow card beside empty space */
+.incident-list{grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))}
+
+/* phones: header fits without sideways scrolling */
+@media(max-width:600px){
+  .topbar{gap:10px}
+  .topbar-right{gap:6px;flex-shrink:1}
+  .status{gap:6px}
+  .status .small-button{margin-left:2px;padding:7px 8px}
+  .account-chip .small-button{padding:7px 8px}
+}
+@media(max-width:380px){.brand{font-size:17px}.brand-mark{width:28px;height:28px;font-size:17px}}
+/* a lone incident keeps a readable width instead of stretching across the whole panel */
+.incident-list:has(>.incident-card:only-child){grid-template-columns:minmax(0,760px)}
