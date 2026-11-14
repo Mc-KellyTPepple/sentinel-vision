@@ -68,6 +68,11 @@ def get_model() -> "YOLO":
     global _model
     if _model is None:
         from ultralytics import YOLO  # heavy import (torch); deferred so startup and /health stay fast
+        try:  # do not rely on OMP_NUM_THREADS being set on the host (14 Nov 2026: an analysis ran for many minutes)
+            import torch
+            torch.set_num_threads(max(1, settings.torch_num_threads))
+        except Exception:  # pragma: no cover - torch always ships with ultralytics
+            pass
         _model = YOLO(settings.model_name)
     return _model
 
@@ -190,8 +195,12 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
         preview_image = None
         keyframes = KeyframePicker(duration, max(0, settings.max_keyframes))
         frame_index = sampled = processed = 0
+        stopped_at: float | None = None  # clip time where the time budget ran out
         inference_started = time.perf_counter()
         while sampled < settings.max_analysis_frames:
+            if processed and time.perf_counter() - inference_started > settings.max_analysis_seconds:
+                stopped_at = frame_index / fps
+                break
             ok, frame = cap.read()
             if not ok:
                 break
@@ -269,6 +278,8 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
                 "CPU-based sampled-frame detection with ByteTrack IDs. Class diagnostics include "
                 "confidence and frame coverage; high coverage is not proof of a real-world event. "
                 "Track IDs may change when objects are occluded or missed."
+                + (f" The server was slow, so analysis stopped after {settings.max_analysis_seconds}s: only the first "
+                   f"{stopped_at:.1f}s of the clip were analysed." if stopped_at is not None else "")
             )
         )
     finally:
