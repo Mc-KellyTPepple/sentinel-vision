@@ -15,15 +15,15 @@ from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from .attributes import KeyframePicker, dominant_color
-from .config import settings
+from .config import API_DIR, settings
 from .schemas import AnalysisSummary, Detection
 
-API_VERSION = "0.2.0"
+API_VERSION = "0.3.0"
 
-if TYPE_CHECKING:  # ultralytics/torch are imported lazily, on the first inference request
-    from ultralytics import YOLO
+if TYPE_CHECKING:  # onnxruntime is imported lazily, when the detector loads
+    from .detector import OnnxDetector
 
-_model: "YOLO | None" = None
+_model: "OnnxDetector | None" = None
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 # One YOLO model and one ByteTrack state are shared by the whole process, so every use of the
@@ -34,8 +34,8 @@ model_lock = threading.Lock()
 live_state: dict[str, str | None] = {"session_id": None}
 LOCK_WAIT_SECONDS = 20
 
-# Start-up warm-up state: idle -> loading -> ready (or failed). Free hosts take about a minute to import
-# PyTorch and load the model; during that time requests get a quick, readable 503 instead of hanging.
+# Start-up warm-up state: idle -> loading -> ready (or failed). Loading takes a few seconds on a free host;
+# during that time requests get a quick, readable 503 instead of hanging.
 warmup: dict[str, str | None] = {"state": "idle", "error": None}
 _log = logging.getLogger("uvicorn.error")
 
@@ -55,7 +55,7 @@ def warm_up() -> None:
     try:
         with model_lock:
             model = get_model()
-            model.track(source=np.zeros((416, 416, 3), dtype=np.uint8), **inference_kwargs())
+            model.track(np.zeros((416, 416, 3), dtype=np.uint8), **detector_args())
             reset_trackers(model)
             live_state["session_id"] = None
         warmup["state"] = "ready"
@@ -64,16 +64,21 @@ def warm_up() -> None:
         warmup["state"], warmup["error"] = "failed", f"{type(exc).__name__}: {exc}"[:200]
         _log.exception("Detector warm-up failed; falling back to loading on the first request.")
 
-def get_model() -> "YOLO":
+def model_path() -> Path:
+    """The ONNX weights file. An older MODEL_NAME such as "yolo11n.pt" maps to the matching ".onnx" file."""
+    name = Path(settings.model_name)
+    if name.suffix.lower() != ".onnx":
+        name = name.with_suffix(".onnx")
+    return name if name.is_absolute() else API_DIR / name
+
+def get_model() -> "OnnxDetector":
     global _model
     if _model is None:
-        from ultralytics import YOLO  # heavy import (torch); deferred so startup and /health stay fast
-        try:  # do not rely on OMP_NUM_THREADS being set on the host (14 Nov 2026: an analysis ran for many minutes)
-            import torch
-            torch.set_num_threads(max(1, settings.torch_num_threads))
-        except Exception:  # pragma: no cover - torch always ships with ultralytics
-            pass
-        _model = YOLO(settings.model_name)
+        from .detector import OnnxDetector
+        path = model_path()
+        if not path.exists():
+            raise FileNotFoundError(f"Detector weights not found at {path}. The Docker build downloads them.")
+        _model = OnnxDetector(str(path), threads=settings.inference_threads)
     return _model
 
 def is_model_loaded() -> bool:
@@ -85,19 +90,24 @@ def inference_kwargs() -> dict:
         "conf": max(0.01, min(0.99, settings.confidence_threshold)),
         "iou": max(0.1, min(0.9, settings.iou_threshold)),
         "imgsz": max(320, min(1280, settings.inference_image_size)),
-        "device": "cpu", "tracker": "bytetrack.yaml", "persist": True, "verbose": False,
+        "device": "cpu", "tracker": "bytetrack-lite (IoU, two-stage)", "persist": True, "verbose": False,
     }
+
+def detector_args() -> dict:
+    kw = inference_kwargs()
+    return {"conf": kw["conf"], "iou": kw["iou"], "imgsz": kw["imgsz"]}
 
 def run_config(fps: float | None = None) -> dict:
     """Everything needed to reproduce an analysis: model, thresholds, sampling and versions."""
     try:
         from importlib.metadata import version
-        ultralytics_version = version("ultralytics")
+        runtime_version = version("onnxruntime")
     except Exception:  # not installed in tests
-        ultralytics_version = None
+        runtime_version = None
     kw = inference_kwargs()
     return {
-        "api_version": API_VERSION, "model": settings.model_name, "ultralytics": ultralytics_version,
+        "api_version": API_VERSION, "model": model_path().name, "runtime": "onnxruntime",
+        "onnxruntime": runtime_version, "threads": max(1, settings.inference_threads),
         "tracker": kw["tracker"], "device": kw["device"], "confidence_threshold": kw["conf"],
         "iou_threshold": kw["iou"], "image_size": kw["imgsz"], "frame_stride": max(1, settings.frame_stride),
         "max_analysis_frames": settings.max_analysis_frames,
@@ -105,6 +115,10 @@ def run_config(fps: float | None = None) -> dict:
     }
 
 def reset_trackers(model) -> None:
+    reset = getattr(model, "reset", None)
+    if callable(reset):
+        reset()
+        return
     predictor = getattr(model, "predictor", None)
     trackers = getattr(predictor, "trackers", None) if predictor is not None else None
     for tracker in trackers or []:
@@ -209,10 +223,10 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
             if current % max(1, settings.frame_stride):
                 continue
             sampled += 1
-            result = model.track(source=frame, **inference_kwargs())[0]
+            result = model.track(frame, **detector_args())
             processed += 1
             t_now = current / fps
-            frame_labels = [str(result.names.get(int(b.cls.item()), int(b.cls.item()))) for b in result.boxes] if result.boxes is not None else []
+            frame_labels = result.labels
             annotated = None
             # Save an annotated JPEG from the first processed frame for the dashboard preview.
             if preview_image is None:
@@ -223,22 +237,9 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
             # Evidence keyframes: only frames where what is visible changes (drawn and encoded only when chosen).
             if keyframes.wants(t_now, frame_labels):
                 keyframes.add(t_now, current, frame_labels, annotated if annotated is not None else result.plot())
-            if result.boxes is None:
-                continue
-            detections_before_frame = len(detections)
             for box in result.boxes:
-                cls_id = int(box.cls.item())
-                label = str(result.names.get(cls_id, cls_id))
-                confidence = float(box.conf.item())
-                x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
-                # Track IDs align with the current frame's boxes.
-                track_id = None
-                try:
-                    box_index = len(detections) - detections_before_frame
-                    if getattr(result.boxes, "id", None) is not None:
-                        track_id = int(result.boxes.id[box_index].item())
-                except (AttributeError, IndexError, TypeError, ValueError):
-                    track_id = None
+                cls_id, label, confidence, track_id = box.cls_id, box.label, box.confidence, box.track_id
+                x1, y1, x2, y2 = box.xyxy
                 detections.append(Detection(
                     frame=current, timestamp_seconds=round(current / fps, 3),
                     class_id=cls_id, label=label, confidence=round(confidence, 5),
@@ -275,7 +276,7 @@ def _analyze_with_model(model, cap, filename: str, fps: float, duration: float, 
             detections=detections, preview_image=preview_image,
             keyframes=keyframes.items, run_config=run_config(fps),
             note=(
-                "CPU-based sampled-frame detection with ByteTrack IDs. Class diagnostics include "
+                "CPU-based sampled-frame detection (YOLO11n on ONNX Runtime) with tracker IDs. Class diagnostics include "
                 "confidence and frame coverage; high coverage is not proof of a real-world event. "
                 "Track IDs may change when objects are occluded or missed."
                 + (f" The server was slow, so analysis stopped after {settings.max_analysis_seconds}s: only the first "
@@ -305,25 +306,16 @@ def process_live_frame(content: bytes, session_id: str) -> dict:
         if live_state["session_id"] != session_id:  # new browser session -> fresh track IDs
             reset_trackers(model)
             live_state["session_id"] = session_id
-        result = model.track(source=frame, **inference_kwargs())[0]
+        result = model.track(frame, **detector_args())
         detections = []
-        boxes = result.boxes
-        if boxes is not None:
-            for index, box in enumerate(boxes):
-                track_id = None
-                try:
-                    if getattr(boxes, "id", None) is not None:
-                        track_id = int(boxes.id[index].item())
-                except (AttributeError, IndexError, TypeError, ValueError):
-                    track_id = None
-                cls_id = int(box.cls.item())
-                x1, y1, x2, y2 = [round(float(v), 2) for v in box.xyxy[0].tolist()]
-                label = str(result.names.get(cls_id, cls_id))
-                detections.append({
-                    "track_id": track_id, "label": label, "color": dominant_color(frame, (x1, y1, x2, y2), label),
-                    "confidence": round(float(box.conf.item()), 5),
-                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                })
+        for box in result.boxes:
+            x1, y1, x2, y2 = [round(v, 2) for v in box.xyxy]
+            detections.append({
+                "track_id": box.track_id, "label": box.label,
+                "color": dominant_color(frame, (x1, y1, x2, y2), box.label),
+                "confidence": round(box.confidence, 5),
+                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            })
         annotated = result.plot()
     ok_jpg, jpeg = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
     annotated_image = "data:image/jpeg;base64," + base64.b64encode(jpeg.tobytes()).decode("ascii") if ok_jpg else None

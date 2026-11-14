@@ -1,4 +1,4 @@
-"""API behaviour that does not need the YOLO model (so these run fast, without torch)."""
+"""API behaviour that does not need the detector model (so these run fast, without onnxruntime)."""
 import pytest
 from fastapi.testclient import TestClient
 
@@ -191,7 +191,7 @@ def test_ready_reports_optional_features(monkeypatch):
     monkeypatch.setattr(settings, "groq_api_key", "")
     monkeypatch.setattr(settings, "llm_api_key", "")
     body = client.get("/ready").json()
-    assert body["ai_assistant"] is False and body["run_config"]["model"] == settings.model_name
+    assert body["ai_assistant"] is False and body["run_config"]["model"] == inference.model_path().name == "yolo11n.onnx"
 
 
 def test_ask_requires_sign_in_and_a_question(monkeypatch):

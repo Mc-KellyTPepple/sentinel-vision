@@ -9,7 +9,8 @@ ENV_FILE = API_DIR / ".env"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
     app_name: str = "Sentinel Vision API"
-    model_name: str = "yolo11n.pt"
+    # ONNX weights, relative to services/api/ (the Docker build downloads yolo11n.onnx). A ".pt" name maps to ".onnx".
+    model_name: str = "yolo11n.onnx"
     max_upload_mb: int = 20
     max_video_seconds: int = 30
     frame_stride: int = 3
@@ -17,9 +18,9 @@ class Settings(BaseSettings):
     # Time budget for one uploaded-clip analysis (seconds of inference). When it runs out, the frames analysed so far
     # are returned with a note, so a slow or overloaded server can never hold the detector indefinitely.
     max_analysis_seconds: int = 90
-    # PyTorch threads. 1 suits small shared CPUs (free hosting), where one thread per host core makes every frame
+    # Inference threads. 1 suits small shared CPUs (free hosting), where one thread per host core makes every frame
     # slow; raise it on a machine with real dedicated cores.
-    torch_num_threads: int = 1
+    inference_threads: int = 1
     # Detector calibration controls; override safely through services/api/.env.
     confidence_threshold: float = 0.35
     iou_threshold: float = 0.45

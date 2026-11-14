@@ -3,7 +3,7 @@
 CPU-first video intelligence: upload a short clip or use your webcam, detect and track objects with
 YOLO11 + ByteTrack, and turn sustained detections into reviewable incidents with an audit trail.
 
-**Stack:** Next.js 14 · TypeScript · Supabase (Auth, Postgres, Row Level Security) · FastAPI · Ultralytics YOLO11n · OpenCV
+**Stack:** Next.js 14 · TypeScript · Supabase (Auth, Postgres, Row Level Security) · FastAPI · YOLO11n on ONNX Runtime · OpenCV
 
 ## Features
 - **Live operations:** webcam frames are tracked on the API (YOLO11 + ByteTrack) and drawn with motion trails. You can
@@ -39,7 +39,7 @@ flowchart LR
   A --> Y[YOLO11n + ByteTrack, CPU]
   B -- "RLS-protected reads/writes" --> D[(Supabase Postgres)]
 ```
-Vercel hosts only the frontend. The detector needs a long-running Python process with PyTorch, which does not
+Vercel hosts only the frontend. The detector needs a long-running Python process (ONNX Runtime + OpenCV), which does not
 fit Vercel's serverless functions, so the API runs separately (Render free tier, or any container host).
 
 ## Repository layout
@@ -59,7 +59,7 @@ sentinel-vision/
 │       ├── app/               API, detector, schemas
 │       ├── tests/
 │       ├── Dockerfile
-│       └── yolo11n.pt         detector weights
+│       └── app/detector.py    YOLO11n (ONNX) + tracker; weights downloaded by the Docker build
 ├── supabase/
 │   └── migrations/            SQL migrations 001-008, applied in order
 └── docs/
@@ -95,7 +95,8 @@ without 008, but evidence on incidents, false alarms, content search and deletin
 | `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | verify sign-in tokens (required) | none |
 | `ALLOWED_ORIGINS` | exact frontend origins, comma-separated | `http://localhost:3000` |
 | `ALLOWED_ORIGIN_REGEX` | optional, for Vercel preview URLs | empty |
-| `MODEL_NAME` | YOLO weights file | `yolo11n.pt` |
+| `MODEL_NAME` | ONNX weights file | `yolo11n.onnx` |
+| `INFERENCE_THREADS` | ONNX Runtime threads (1 on free hosting) | `1` |
 | `MAX_UPLOAD_MB`, `MAX_VIDEO_SECONDS` | upload limits | 20, 30 |
 | `FRAME_STRIDE`, `MAX_ANALYSIS_FRAMES` | sampling | 3, 300 |
 | `CONFIDENCE_THRESHOLD`, `IOU_THRESHOLD`, `INFERENCE_IMAGE_SIZE` | detector calibration | 0.35, 0.45, 416 |

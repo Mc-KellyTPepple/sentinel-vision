@@ -1,7 +1,7 @@
 # Deployment guide (Vercel + Render + Supabase)
 
-Why two hosts: Vercel serves the Next.js frontend. The detector needs a long-running Python process with
-PyTorch (hundreds of MB, minutes of CPU per clip), which does not fit Vercel serverless functions. The
+Why two hosts: Vercel serves the Next.js frontend. The detector needs a long-running Python process
+(YOLO11n on ONNX Runtime + OpenCV), which does not fit Vercel serverless functions. The
 FastAPI service therefore runs on Render (free tier) or another container host.
 
 ## 0. Push the code to GitHub (Windows)
@@ -11,8 +11,8 @@ git init -b main
 git add .
 git status
 ```
-Check that `git status` does NOT list `node_modules`, `.next`, `.env` or `.env.local` (they are ignored), and that
-`services/api/yolo11n.pt` IS listed. Then create an empty repository named `sentinel-vision` on GitHub
+Check that `git status` does NOT list `node_modules`, `.next`, `.env` or `.env.local` (they are ignored). The detector weights
+(`yolo11n.onnx`) are not in the repository: the API's Docker build downloads them. Then create an empty repository named `sentinel-vision` on GitHub
 (no README, no .gitignore) and run:
 ```
 git commit -m "Sentinel Vision: initial commit"
@@ -22,7 +22,6 @@ git push -u origin main
 
 ## 0b. Before you start
 - Push the repository to GitHub **without** `node_modules`, `.next`, `.env` or `.env.local` (`.gitignore` covers them).
-- Commit `services/api/yolo11n.pt` (about 5.6 MB) so the API does not download weights at request time.
 
 ## 1. Supabase
 1. SQL editor: run `supabase/migrations/001` to `007`, in order.
@@ -33,8 +32,8 @@ git push -u origin main
 1. New > Blueprint > pick the repo (it reads `render.yaml`), or create a Web Service with root directory `services/api`.
 2. Set the `sync: false` variables: `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `ALLOWED_ORIGINS` (temporarily `http://localhost:3000`).
 3. Deploy, then open `https://<service>.onrender.com/health`: expect `{"status":"ok", ...}`.
-4. First analysis request loads PyTorch and the model. Watch the logs. If the service restarts with an
-   out-of-memory message (the free instance has 512 MB of RAM), see "If the free tier is not enough".
+4. The detector loads a few seconds after start-up (`/ready` shows `"detector": "ready"`). It uses about
+   150-200 MB of the free instance's 512 MB.
 
 ### Creating the Render service without the Blueprint
 The API is deployed from `services/api/Dockerfile` (it installs the system libraries OpenCV needs, which Render's plain
@@ -67,12 +66,12 @@ Symptoms: out-of-memory restarts, analysis taking minutes, request timeouts. Opt
 1. Lower the limits (already conservative in `render.yaml`): `MAX_VIDEO_SECONDS`, `MAX_ANALYSIS_FRAMES`, `INFERENCE_IMAGE_SIZE=320`.
 2. Move the API to a host with more memory. A Docker-based Hugging Face Space on the free CPU tier is a common
    choice for demos like this (check its current limits); Render's paid plans also work. Only `NEXT_PUBLIC_API_BASE_URL` and `ALLOWED_ORIGINS` change.
-3. Export the detector to ONNX and use onnxruntime to cut memory; this requires replacing the Ultralytics tracker usage.
 
 ## Performance on the free tier
-`OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1` (set in `render.yaml`) stop PyTorch from oversubscribing the small CPU slice.
-Each live frame still takes a few seconds on a free instance; expect a slideshow rather than video. If a frame takes
-tens of seconds, lower `INFERENCE_IMAGE_SIZE` to 320, or move the API to a host with real CPU cores.
+The API runs YOLO11n through ONNX Runtime on one thread (`INFERENCE_THREADS=1`), with its own letterbox, NMS and a
+ByteTrack-style IoU tracker, so no PyTorch is installed. On one full CPU core a frame takes about 30 ms at
+`INFERENCE_IMAGE_SIZE=416`; the free instance's CPU slice is much smaller, so expect a few frames per second. If
+frames are still slow, lower `INFERENCE_IMAGE_SIZE` to 320.
 Uploads and the live camera share one detector, so stop the camera before analysing a clip.
 
 ## Operations notes
