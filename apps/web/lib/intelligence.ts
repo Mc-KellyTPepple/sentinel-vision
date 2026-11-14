@@ -737,6 +737,20 @@ export function answerLocally(question: string, inv: Investigation): LocalAnswer
     const extra = targets.includes("person") && inv.peakPeople.count ? ` At most ${plural(inv.peakPeople.count, "person")} were visible at the same time (${mmss(inv.peakPeople.t)}).` : "";
     return { answer: `${parts.join(", ") || "No objects"} (each tracked object counted once).${extra} Counts can be off when tracking loses an object and gives it a new ID.`, times: [] };
   }
+  // Where an object was and how long it stayed ("Where was the cat and how long was it visible?"; added 14 Nov 2026
+  // after the live test, which showed the analyst could not answer this although the profiles hold the answer).
+  if (labels.length && /\b(where|how long|duration|visible|stay|stayed|spent|position|located|place|move|moved|still)\b/.test(q)) {
+    const ps = inv.profiles.filter((p) => labels.includes(p.label));
+    if (!ps.length) return { answer: `No ${labels.join("/")} was detected.`, times: [] };
+    const lines = ps.slice(0, 8).map((p) => {
+      const span = Math.max(0, p.last - p.first);
+      const at = (r: string) => (r === "the centre" ? `in ${r}` : `on ${r}`);
+      const where = p.startRegion === p.endRegion ? at(p.startRegion) : `from ${p.startRegion} to ${p.endRegion}`;
+      const still = p.longestStill >= 2 && !p.direction ? `, mostly staying in place (still for up to ${p.longestStill.toFixed(0)}s)` : p.direction ? `, moving ${p.direction}` : "";
+      return `${nameTrack(p.label, p.id, p.color)} was in view ${where} from ${mmss(p.first)} to ${mmss(p.last)} (about ${span.toFixed(0)}s)${still}.`;
+    });
+    return { answer: `${lines.join("\n")}\nPositions are approximate (left, centre or right of the frame).`, times: ps.map((p) => p.first) };
+  }
   if (/when|what time|first|appear|show up|arriv/.test(q) && labels.length) {
     const ps = inv.profiles.filter((p) => labels.includes(p.label));
     return ps.length ? { answer: ps.slice(0, 8).map((p) => `${nameTrack(p.label, p.id, p.color)} appeared at ${mmss(p.first)}, last seen ${mmss(p.last)}.`).join("\n"), times: ps.map((p) => p.first) } : { answer: `No ${labels.join("/")} was detected.`, times: [] };
